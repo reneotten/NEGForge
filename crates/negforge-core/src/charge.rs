@@ -1,36 +1,14 @@
 //! NEGF-derived charge density, feeding the self-consistent electrostatic
 //! loop.
 //!
-//! This is a port of `calc_n()` in `legacy_matlab/quantumsim.m`, with two
-//! deliberate bug fixes documented here and in the top-level README:
+//! Each contact contributes its energy-dependent Fermi occupation weighted
+//! by its own propagating-band injection. Evanescent leads shift the
+//! retarded Hamiltonian but inject no particles.
 //!
-//! 1. The original multiplies the whole energy sum by a single scalar
-//!    `f(E_fs)` / `f(E_fd)` (the Fermi function evaluated once, outside the
-//!    sum) instead of the energy-dependent occupation `f_s(E)` / `f_d(E)`
-//!    used everywhere else in the model (e.g. in `calc_current`). That
-//!    collapses the energy dependence of the injected charge to a single
-//!    number and made the original `calc_n` effectively decorative — it was
-//!    never fed back into `calc_potential`. Here the proper per-energy
-//!    Fermi weight is used, matching `calc_current`.
-//! 2. The original reuses one `mask = E > Psi_f(1)` (the *source* band
-//!    edge) for both the source and drain contact terms. Each contact's
-//!    contribution is now masked by its own band edge, consistent with how
-//!    `calc_green` already conditions each contact's self-energy on its own
-//!    band edge.
-//!
-//! **Third deviation, required for the self-consistent loop to be
-//! numerically meaningful at all:** the original additionally multiplied by
-//! `1e9` to convert the `1/a`-scaled sum from nm^-1 to m^-1 — sensible for
-//! plotting a density on a real-world axis, but `a` and `lambda` (the two
-//! length scales that actually drive `calc_potential`) are expressed in nm
-//! *everywhere else* in this model. Feeding a value that's ~1e9x too large
-//! back into `rho` (which shares scale with `Psi_g/lambda^2` etc., all
-//! still in nm) overwhelms the electrostatic solve and the fixed-point
-//! iteration diverges. [`electron_density`] therefore returns the density
-//! in nm^-1, matching the model's own native length unit. The caller
-//! (`selfconsistent.rs`) is responsible for converting to a proper volume
-//! charge density (m^-1 -> m^-3 assuming unit cross-section, times `-e`)
-//! before assigning it to `rho` — see that module's docs.
+//! The return value is a linear number density in nm^-1. Multiplication by
+//! `1e9` converts to m^-1; conversion to volume charge additionally requires
+//! a specified transverse area and multiplication by `-e`. A choice of units
+//! cannot repair a missing cross-section or SI/nm conversion in Poisson.
 //!
 //! ## Validity: normalization and what's still a simplification
 //!
@@ -47,22 +25,23 @@
 //! `n(x) = (1/2*pi) * integral[Gamma_S(E) f_S(E) |G_{x,1}|^2 +
 //! Gamma_D(E) f_D(E) |G_{x,N}|^2] dE` exactly. One thing that is *not* a
 //! mere normalization choice: there is no explicit spin-degeneracy factor
-//! of two here (unlike `calc_current`'s explicit `2*e/h`), carried over
-//! unchanged from the original `calc_n`, which was never checked against a
-//! reference since it was never fed back into anything before this
-//! rewrite. If your convention for `f_S`/`f_D`/the density of states
-//! already bakes in spin degeneracy this is correct as-is; if not, this
-//! systematically undercounts by 2x relative to a genuinely
-//! spin-summed electron density. Not fixed here since which convention is
-//! "right" depends on how the density is meant to be used downstream and
-//! wasn't specified by the original coursework code either.
+//! of two here (unlike `calc_current`'s explicit `2*e/h`). Thus this API
+//! returns a **per-spin**, single-orbital linear density in nm^-1. A Fermi
+//! probability cannot encode spin degeneracy: multiply by two downstream
+//! when a spin-summed density is required.
+//!
+//! The rectangular sum assumes a uniform grid with the caller's `d_e`;
+//! grid endpoints, finite window truncation, and narrow resonances require
+//! explicit quadrature convergence checks. Only contact-injected charge is
+//! included: finite device eta has no matching injection, and isolated bound
+//! states have no occupation prescription. See `crate::negf`.
 
 use crate::constants::{E, K_B};
 use crate::negf::GreenFunctionResult;
 
 /// Compute the electron number density `n(x)` from a Green's-function
-/// sweep, using the same convention as `legacy_matlab/quantumsim.m`
-/// (see module docs for the two bug fixes applied).
+/// sweep. The result is per spin in nm^-1; see the module docs for units
+/// and quadrature assumptions.
 #[allow(clippy::too_many_arguments)]
 pub fn electron_density(
     green: &GreenFunctionResult,
@@ -78,8 +57,22 @@ pub fn electron_density(
     let n_sites = green.g_col_source[0].len();
     let mut n = vec![0.0; n_sites];
 
-    let f_s = |energy: f64| 1.0 / (((energy - e_fs) * E / (K_B * temperature)).exp() + 1.0);
-    let f_d = |energy: f64| 1.0 / (((energy - e_fd) * E / (K_B * temperature)).exp() + 1.0);
+    assert!(temperature.is_finite() && temperature >= 0.0);
+    let fermi = |energy: f64, mu: f64| {
+        if temperature == 0.0 {
+            if energy < mu {
+                1.0
+            } else if energy > mu {
+                0.0
+            } else {
+                0.5
+            }
+        } else {
+            1.0 / (((energy - mu) * E / (K_B * temperature)).exp() + 1.0)
+        }
+    };
+    let f_s = |energy: f64| fermi(energy, e_fs);
+    let f_d = |energy: f64| fermi(energy, e_fd);
 
     for (k, &energy) in green.energies.iter().enumerate() {
         let gamma_s = if energy > psi_f_source {
@@ -105,4 +98,50 @@ pub fn electron_density(
         *v = *v / std::f64::consts::PI * d_e / a;
     }
     n
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_relative_eq;
+    use num_complex::Complex64;
+
+    #[test]
+    fn equilibrium_density_matches_analytic_infinite_chain_per_spin() {
+        use crate::device::{Device, DeviceParams};
+        use crate::negf::green_function_sweep;
+        let mut device = Device::new(DeviceParams {
+            a: 1.0,
+            l_ch: 3.0,
+            l_ds: 2.0,
+            auto_size_contacts: false,
+            ..Default::default()
+        });
+        device.psi_f.fill(0.0);
+        let t = device.t_hop;
+        // Midpoint quadrature avoids the integrable band-edge singularities.
+        let steps = 2000;
+        let d_e = 2.0 * t / steps as f64;
+        let energies: Vec<_> = (0..steps).map(|i| (i as f64 + 0.5) * d_e).collect();
+        let green = green_function_sweep(&device, &energies, 1e-12 * t);
+        let n = electron_density(&green, t, 1.0, 0.0, 0.0, 2.0 * t, 2.0 * t, 0.0, d_e);
+        // Half a filled single-spin band contains 1/2 electron per site.
+        for value in n {
+            assert_relative_eq!(value, 0.5, epsilon = 0.004);
+        }
+    }
+
+    #[test]
+    fn zero_temperature_fermi_edge_has_half_occupation() {
+        let green = GreenFunctionResult {
+            energies: vec![1.0, 2.0, 3.0],
+            g_diag: vec![vec![0.0]; 3],
+            g_col_source: vec![vec![1.0]; 3],
+            g_col_drain: vec![vec![0.0]; 3],
+            k_sa: vec![Complex64::new(std::f64::consts::FRAC_PI_2, 0.0); 3],
+            k_da: vec![Complex64::new(0.0, 0.0); 3],
+        };
+        let n = electron_density(&green, 1.0, 2.0, 0.0, 0.0, 2.0, 2.0, 0.0, 1.0);
+        assert_relative_eq!(n[0], 1.5 / (2.0 * std::f64::consts::PI), epsilon = 1e-14);
+    }
 }

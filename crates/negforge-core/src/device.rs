@@ -1,24 +1,23 @@
 //! Device geometry, electrostatics and ballistic-current model.
 //!
-//! This is a port of `legacy_matlab/quantumsim.m`. It models a 1D
+//! The model is a 1D
 //! source-channel-drain chain (source and drain treated as long, heavily
 //! screened contact regions) with:
 //!
 //! - an electrostatic potential solved from a 1D "natural length" (`lambda`)
-//!   approximation rather than a full 2D/3D Poisson equation — the same
-//!   simplification the original coursework code used, common in compact
+//!   approximation rather than a full 2D/3D Poisson equation, common in compact
 //!   models for thin-body/double-gate MOSFETs;
 //! - a ballistic (Landauer) drain current from Fermi-Dirac occupation of the
 //!   source and drain reservoirs.
 //!
-//! Units follow the original code: lengths in nm, energies/potentials in eV,
+//! Units: lengths in nm, energies/potentials in eV,
 //! temperature in Kelvin. `Psi_g`/`Psi_bi`/`Psi_f` store *potential energy*
 //! (already in eV), not electrostatic potential in volts — consistent with
 //! `E_f`/`E_g` also being in eV.
 //!
 //! ## Validity of the approximations
 //!
-//! - **Natural-length electrostatics** (see [`Device::compute_lambda`]) is a
+//! - **Natural-length electrostatics** (`Device::compute_lambda`) is a
 //!   thin-body/double-gate compact-model reduction of the full 2D/3D Poisson
 //!   equation. It assumes the transverse potential profile is parabolic
 //!   (valid when the body is thin compared to the channel length) and breaks
@@ -27,15 +26,13 @@
 //!   also a *classical* charge model in the transverse direction — it does
 //!   not resolve transverse-mode (subband) quantization from confinement in
 //!   `d_ch`, unlike the longitudinal NEGF treatment in `negf.rs`.
-//! - **Ballistic (Landauer) current** ([`Device::calc_current`]) assumes
-//!   perfect transmission (`T = 1`) for every state above the barrier top
-//!   (`psi_0`) and zero transmission below it — i.e. no scattering
-//!   (phonon/impurity/surface-roughness) anywhere in the channel, and no
-//!   sub-barrier tunneling. This is the "top-of-the-barrier" thermionic
-//!   -emission limit; it is a good approximation only when the channel is
-//!   short compared to the carrier mean free path, and it overestimates
-//!   current (and underestimates subthreshold current, since tunneling is
-//!   excluded) for longer or more heavily doped channels.
+//! - **Coherent single-mode Landauer current** ([`Device::calc_negf_current`])
+//!   includes elastic reflection and sub-barrier tunneling through `psi_f`,
+//!   with conserving real-energy semi-infinite leads and no absorbing eta.
+//!   It omits inelastic scattering, transverse subbands and valley degeneracy.
+//!   [`Device::calc_thermionic_current`] retains the analytic top-of-the-barrier
+//!   comparator, `T(E) = theta(E - psi_0)`, which omits quantum reflection,
+//!   tunneling and the discretized leads' finite upper band edges.
 //! - **Effective-mass, single-valley, parabolic band** (`m_eff`, used in
 //!   `t_hop` here and in the NEGF hopping parameter). Real silicon has
 //!   multiple equivalent conduction-band valleys (a valley-degeneracy factor
@@ -48,10 +45,10 @@
 //!   conductance quantum).
 
 use crate::constants::{E, EPS_0, H_BAR, K_B, M_E};
+use crate::error::{NegForgeError, Result};
 use crate::tridiag;
 
-/// Configuration for a [`Device`]. Field defaults match the original
-/// `quantumsim.m` `properties` block.
+/// Configuration for a [`Device`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DeviceParams {
     /// Grid spacing, nm.
@@ -76,15 +73,15 @@ pub struct DeviceParams {
     pub geo: f64,
     /// Channel length, nm.
     pub l_ch: f64,
-    /// If `true` (default, matching the original constructor), the
+    /// If `true` (default), the
     /// source/drain contact length is auto-sized to `floor(lambda) * 15`
     /// instead of using `l_ds` directly.
     pub auto_size_contacts: bool,
     /// Source/drain contact region length, nm. Only used verbatim when
     /// `auto_size_contacts` is `false`.
     pub l_ds: f64,
-    /// Fixed dopant charge term added to the mobile charge density in the
-    /// electrostatic solve.
+    /// Fixed dopant charge density in C/m^3, added to the mobile charge
+    /// density in the electrostatic solve.
     pub n_dot: f64,
     /// Fermi-function tolerance used to bound the ballistic energy window.
     pub epsilon: f64,
@@ -130,11 +127,17 @@ impl Default for DeviceParams {
 pub struct Device {
     pub params: DeviceParams,
 
+    /// Explicit transverse active area in m² for spin-summed SCF charge.
+    /// `None` selects the per-spin, implicit 1 m² normalization;
+    /// it is not a physical device cross-section. No width is inferred
+    /// from `d_ch`, `geo`, or the longitudinal grid.
+    pub effective_area_m2: Option<f64>,
+
     /// Natural (screening) length, nm.
     pub lambda: f64,
     /// Number of grid points along the channel.
     pub n: usize,
-    /// Last grid index (0-based) belonging to the source region.
+    /// First grid index (0-based) belonging to the channel region.
     pub n_left: usize,
     /// First grid index (0-based) belonging to the drain region.
     pub n_right: usize,
@@ -151,7 +154,7 @@ pub struct Device {
     /// `max(psi_f)`, used as the lower bound of the ballistic energy window.
     pub psi_0: f64,
 
-    /// Drain Fermi level, eV (`-V_ds + 0.05`, matching the original code).
+    /// Drain Fermi level, eV (`e_fs - V_ds`).
     pub e_fd: f64,
     /// Upper bound of the ballistic energy integration window, eV.
     pub e_max: f64,
@@ -160,10 +163,92 @@ pub struct Device {
 }
 
 impl Device {
-    /// Build a new device, replicating the `quantumsim()` MATLAB
-    /// constructor: `lambda` is computed first, then (if
-    /// `auto_size_contacts`) `l_ds` is overwritten from it before the grid
-    /// is sized.
+    /// Select a physical transverse area, or select implicit unit-area normalization.
+    /// This does not infer a device width or change the per-spin NEGF API.
+    pub fn set_effective_area_m2(&mut self, area: Option<f64>) -> Result<()> {
+        Self::validate_effective_area(area)?;
+        self.effective_area_m2 = area;
+        Ok(())
+    }
+
+    fn validate_effective_area(area: Option<f64>) -> Result<()> {
+        if area.is_some_and(|a| !a.is_finite() || a <= 0.0) {
+            return Err(NegForgeError::InvalidParameter(
+                "effective_area_m2 must be positive and finite when supplied".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Convert per-spin linear density (nm^-1) to signed volume charge (C/m³).
+    /// With explicit area, both spins contribute: `-2 e n 1e9 / area`.
+    /// `None` retains the old `-e n 1e9` numerical normalization exactly;
+    /// it is not a physically specified cross-section. Validate the device
+    /// and the finite nonnegative input before numerical work.
+    pub fn mobile_charge_density(&self, per_spin_nm_inv: f64) -> f64 {
+        match self.effective_area_m2 {
+            Some(area) => -2.0 * E * per_spin_nm_inv * 1e9 / area,
+            None => -E * per_spin_nm_inv * 1e9,
+        }
+    }
+
+    /// Validate parameters and public vector state before numerical work.
+    pub fn validate(&self) -> Result<()> {
+        Self::validate_effective_area(self.effective_area_m2)?;
+        crate::resources::check_sites(self.n)?;
+        for (name, value) in [
+            ("a", self.params.a),
+            ("d_ox", self.params.d_ox),
+            ("d_ch", self.params.d_ch),
+            ("k_si", self.params.k_si),
+            ("k_ox", self.params.k_ox),
+            ("geo", self.params.geo),
+            ("l_ch", self.params.l_ch),
+            ("d_e", self.params.d_e),
+            ("m_eff", self.params.m_eff),
+            ("lambda", self.lambda),
+            ("t_hop", self.t_hop),
+        ] {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(NegForgeError::InvalidParameter(format!(
+                    "{name} must be positive and finite"
+                )));
+            }
+        }
+        if !self.params.t.is_finite()
+            || self.params.t < 0.0
+            || !self.params.l_ds.is_finite()
+            || self.params.l_ds < 0.0
+            || !self.params.epsilon.is_finite()
+            || self.params.epsilon <= 0.0
+            || self.params.epsilon >= 1.0
+            || ![
+                self.params.e_f,
+                self.params.e_g,
+                self.params.e_fs,
+                self.params.v_ds,
+                self.params.v_g,
+                self.params.n_dot,
+                self.e_fd,
+                self.e_max,
+            ]
+            .iter()
+            .all(|v| v.is_finite())
+            || self.n < 2
+            || self.n_left >= self.n_right
+            || self.n_right > self.n
+            || [&self.psi_g, &self.psi_bi, &self.rho, &self.psi_f]
+                .iter()
+                .any(|v| v.len() != self.n || !v.iter().all(|x| x.is_finite()))
+        {
+            return Err(NegForgeError::InvalidParameter(
+                "invalid device geometry, energies or vector state".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Build a device from geometry, material, and reservoir parameters.
     pub fn new(mut params: DeviceParams) -> Self {
         let lambda = Self::compute_lambda(&params);
         if params.auto_size_contacts {
@@ -171,12 +256,13 @@ impl Device {
         }
 
         let (n, n_left, n_right) = Self::compute_grid(&params);
-        let e_fd = -params.v_ds + 0.05;
-        let e_max = params.e_fs - K_B * params.t * params.epsilon.ln() / E;
+        let e_fd = params.e_fs - params.v_ds;
+        let e_max = params.e_fs.max(e_fd) - K_B * params.t * params.epsilon.ln() / E;
         let t_hop = H_BAR.powi(2) / (2.0 * params.m_eff * (params.a * 1e-9).powi(2) * E);
 
         let mut device = Self {
             params,
+            effective_area_m2: None,
             lambda,
             n,
             n_left,
@@ -203,33 +289,74 @@ impl Device {
         (params.k_si / params.k_ox * params.d_ch * params.d_ox / params.geo).sqrt()
     }
 
-    fn compute_grid(params: &DeviceParams) -> (usize, usize, usize) {
-        let l_g = 2.0 * params.l_ds + params.l_ch;
-        let n = (l_g / params.a).floor() as usize + 1;
+    /// Check the effective (including auto-sized contacts) site count without
+    /// allocating. Shared by construction and Python parameter validation.
+    pub fn checked_site_count(params: &DeviceParams) -> Result<usize> {
+        let mut effective = *params;
+        let lambda = Self::compute_lambda(params);
+        if effective.auto_size_contacts {
+            effective.l_ds = lambda.floor() * 15.0;
+        }
+        if !lambda.is_finite() || lambda <= 0.0 {
+            return Err(NegForgeError::InvalidParameter(
+                "invalid screening length".into(),
+            ));
+        }
+        Self::checked_grid(&effective).map(|(n, _, _)| n)
+    }
+
+    fn checked_grid(params: &DeviceParams) -> Result<(usize, usize, usize)> {
+        let intervals = ((2.0 * params.l_ds + params.l_ch) / params.a).floor();
+        if !params.a.is_finite()
+            || params.a <= 0.0
+            || !params.l_ds.is_finite()
+            || params.l_ds < 0.0
+            || !params.l_ch.is_finite()
+            || params.l_ch <= 0.0
+            || !intervals.is_finite()
+            || intervals < 1.0
+            || intervals >= crate::resources::MAX_SITES as f64
+        {
+            return Err(NegForgeError::InvalidParameter(
+                "geometry exceeds practical site budget".into(),
+            ));
+        }
+        let n = (intervals as usize)
+            .checked_add(1)
+            .ok_or_else(|| NegForgeError::InvalidParameter("site count overflow".into()))?;
+        crate::resources::check_sites(n)?;
         let n_left = (params.l_ds / params.a).floor() as usize;
-        let n_right = n - n_left;
-        (n, n_left, n_right)
+        let n_right = n
+            .checked_sub(n_left)
+            .ok_or_else(|| NegForgeError::InvalidParameter("invalid contact count".into()))?;
+        if n_left >= n_right {
+            return Err(NegForgeError::InvalidParameter("empty channel".into()));
+        }
+        Ok((n, n_left, n_right))
+    }
+
+    fn compute_grid(params: &DeviceParams) -> (usize, usize, usize) {
+        Self::checked_grid(params).expect("invalid device geometry or site budget")
     }
 
     /// Rebuild `psi_g`, `psi_bi` and reset `rho` from the current
-    /// parameters and region boundaries. Mirrors `init_vectors()`.
+    /// parameters and region boundaries.
     pub fn init_vectors(&mut self) {
         self.psi_g = vec![0.0; self.n];
         self.psi_bi = vec![0.0; self.n];
         self.rho = vec![0.0; self.n];
 
-        // Channel: indices n_left..n_right-1 (0-based, matching MATLAB's
-        // 1-based `n_left+1 : n_right-1`).
-        for i in self.n_left..self.n_right.saturating_sub(1) {
+        // Keep the source and drain contact site counts identical. The
+        for i in self.n_left..self.n_right {
             self.psi_g[i] = -self.params.v_g;
             self.psi_bi[i] = self.params.e_f + self.params.e_g / 2.0;
         }
-        // Drain: indices n_right-1..N (0-based, matching `n_right:end`).
-        for i in (self.n_right.saturating_sub(1))..self.n {
+        // Drain: n_right..n.
+        for i in self.n_right..self.n {
             self.psi_g[i] = 0.0;
             self.psi_bi[i] = -self.params.v_ds;
         }
-        // Source region (0..n_left) stays at zero, as in the original.
+        // Source region (0..n_left) stays at zero.
     }
 
     /// Build the tridiagonal second-difference operator with the
@@ -248,7 +375,7 @@ impl Device {
 
     /// Solve for the self-consistent-length electrostatic potential energy
     /// profile given the current `rho`, storing the result in `psi_f` and
-    /// updating `psi_0 = max(psi_f)`. Mirrors `calc_potential()`.
+    /// updating `psi_0 = max(psi_f)`.
     pub fn calc_potential(&mut self) {
         let (sub, mut diag, sup) = self.laplacian();
         let inv_lambda2 = 1.0 / self.lambda.powi(2);
@@ -258,7 +385,9 @@ impl Device {
 
         let rhs: Vec<f64> = (0..self.n)
             .map(|i| {
-                (self.rho[i] + self.params.n_dot) / (EPS_0 * self.params.k_si)
+                // rho is C/m^3; the Laplacian is nm^-2. Electron potential
+                // energy U/e = -phi has source +rho/epsilon.
+                (self.rho[i] + self.params.n_dot) * 1e-18 / (EPS_0 * self.params.k_si)
                     - inv_lambda2 * (self.psi_g[i] + self.psi_bi[i])
             })
             .collect();
@@ -267,32 +396,129 @@ impl Device {
         self.psi_0 = self.psi_f.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     }
 
-    /// Ballistic Landauer current for the current potential profile.
-    /// Mirrors `calc_current()`. Units match the original scaling
-    /// convention (see `legacy_matlab/README.md`).
-    ///
-    /// Integrates `T(E) * [f_s(E) - f_d(E)]` over `E` with `T(E)` implicitly
-    /// `1` for `E >= psi_0` (the barrier top) and `0` below it — see the
-    /// "Ballistic (Landauer) current" note in the module docs for when this
-    /// no-scattering, no-tunneling approximation is (and isn't) reasonable.
-    pub fn calc_current(&self) -> f64 {
-        let f_s = |e: f64| 1.0 / (((e - self.params.e_fs) * E / (K_B * self.params.t)).exp() + 1.0);
-        let f_d = |e: f64| 1.0 / (((e - self.e_fd) * E / (K_B * self.params.t)).exp() + 1.0);
-
-        let n_steps = ((self.e_max - self.psi_0) / self.params.d_e)
-            .floor()
-            .max(0.0) as usize;
-        let mut sum = 0.0;
-        for k in 0..=n_steps {
-            let energy = self.psi_0 + k as f64 * self.params.d_e;
-            sum += f_s(energy) - f_d(energy);
+    /// Coherent, conserving single-mode transmission, in input energy order.
+    /// Uses the endpoint potentials as the two semi-infinite lead band bottoms.
+    /// No artificial eta is applied. Empty input returns an empty spectrum.
+    pub fn transmission_spectrum(&self, energies: &[f64]) -> Result<Vec<f64>> {
+        self.validate()?;
+        if energies.len() > crate::resources::MAX_ENERGIES
+            || !energies.iter().all(|e| e.is_finite())
+        {
+            return Err(NegForgeError::InvalidParameter(
+                "invalid transmission energy grid".into(),
+            ));
         }
-        2.0 * E / crate::constants::H * sum * self.params.d_e * E * 1e-3
+        energies
+            .iter()
+            .map(|&e| crate::negf::coherent_transmission(self, e))
+            .collect()
+    }
+
+    /// Coherent spin-degenerate single-mode Landauer current, amperes.
+    /// Integrates only the overlapping finite lead bands and the occupied
+    /// Fermi-difference window (tail cutoff `epsilon`). Four-point Gaussian
+    /// quadrature uses panels no wider than `d_e`; refine d_e for resonances.
+    /// Transmission is streamed, with no absorbing eta or density sweep.
+    pub fn calc_negf_current(&self) -> Result<f64> {
+        self.validate()?;
+        let mu_s = self.params.e_fs;
+        let mu_d = self.e_fd;
+        if mu_s == mu_d {
+            return Ok(0.0);
+        }
+        let kt = K_B * self.params.t / E;
+        let tail = -kt * self.params.epsilon.ln();
+        let lo = self.psi_f[0]
+            .max(self.psi_f[self.n - 1])
+            .max(mu_s.min(mu_d) - tail);
+        let hi = (self.psi_f[0] + 4.0 * self.t_hop)
+            .min(self.psi_f[self.n - 1] + 4.0 * self.t_hop)
+            .min(mu_s.max(mu_d) + tail);
+        if !lo.is_finite() || !hi.is_finite() {
+            return Err(NegForgeError::InvalidParameter(
+                "non-finite current integration bounds".into(),
+            ));
+        }
+        if hi <= lo {
+            return Ok(0.0);
+        }
+        let count = ((hi - lo) / self.params.d_e).ceil().max(1.0);
+        if !count.is_finite() || count > crate::resources::MAX_ENERGIES as f64 / 4.0 {
+            return Err(NegForgeError::InvalidParameter(
+                "current integration exceeds energy budget".into(),
+            ));
+        }
+        let panels = count as usize;
+        let width = (hi - lo) / panels as f64;
+        // Stable positive f(high mu)-f(low mu), avoiding cancellation in
+        // filled states and preserving tiny-bias linear response.
+        let delta = (mu_s - mu_d).abs();
+        let difference = |energy: f64| {
+            if kt == 0.0 {
+                return 1.0;
+            }
+            let x = (energy - mu_s.max(mu_d)) / kt;
+            let y = (energy - mu_s.min(mu_d)) / kt;
+            let numerator = -(-delta / kt).exp_m1();
+            if y <= 0.0 {
+                numerator * y.exp() / ((1.0 + x.exp()) * (1.0 + y.exp()))
+            } else if x >= 0.0 {
+                numerator * (-x).exp() / ((1.0 + (-x).exp()) * (1.0 + (-y).exp()))
+            } else {
+                numerator / ((1.0 + x.exp()) * (1.0 + (-y).exp()))
+            }
+        };
+        let mut sum = 0.0;
+        for i in 0..panels {
+            let center = lo + (i as f64 + 0.5) * width;
+            for (node, weight) in [
+                (-0.8611363115940526, 0.3478548451374538),
+                (-0.3399810435848563, 0.6521451548625461),
+                (0.3399810435848563, 0.6521451548625461),
+                (0.8611363115940526, 0.3478548451374538),
+            ] {
+                let energy = center + 0.5 * width * node;
+                sum +=
+                    weight * crate::negf::coherent_transmission(self, energy)? * difference(energy);
+            }
+        }
+        let current =
+            2.0 * E * E / crate::constants::H * (mu_s - mu_d).signum() * sum * width / 2.0;
+        if !current.is_finite() {
+            return Err(NegForgeError::InvalidParameter(
+                "non-finite coherent current".into(),
+            ));
+        }
+        Ok(current)
+    }
+
+    /// Default coherent current, amperes. Legacy infallible interface:
+    /// numerical/validation errors are explicit panics, never thermionic fallbacks.
+    /// Use `calc_negf_current` to propagate errors instead.
+    pub fn calc_current(&self) -> f64 {
+        self.calc_negf_current()
+            .expect("coherent current calculation failed")
+    }
+
+    /// Analytic top-of-the-barrier thermionic comparator (not coherent NEGF).
+    /// Spin-degenerate current in amperes; step T(E)=1 above psi_0.
+    pub fn calc_thermionic_current(&self) -> f64 {
+        let kt = K_B * self.params.t / E;
+        let integral = |mu: f64| {
+            if kt == 0.0 {
+                return (mu - self.psi_0).max(0.0);
+            }
+            let x = (mu - self.psi_0) / kt;
+            (mu - self.psi_0).max(0.0) + kt * (-x.abs()).exp().ln_1p()
+        };
+        2.0 * E * E / crate::constants::H * (integral(self.params.e_fs) - integral(self.e_fd))
     }
 
     pub fn set_v_ds(&mut self, v: f64) {
         self.params.v_ds = v;
-        self.e_fd = -v + 0.05;
+        self.e_fd = self.params.e_fs - v;
+        self.e_max =
+            self.params.e_fs.max(self.e_fd) - K_B * self.params.t * self.params.epsilon.ln() / E;
         self.init_vectors();
     }
 
@@ -302,12 +528,16 @@ impl Device {
     }
 
     pub fn set_l_ch(&mut self, l: f64) {
-        self.params.l_ch = l;
-        let (n, n_left, n_right) = Self::compute_grid(&self.params);
+        let mut params = self.params;
+        params.l_ch = l;
+        let (n, n_left, n_right) = Self::compute_grid(&params);
+        self.params = params;
         self.n = n;
         self.n_left = n_left;
         self.n_right = n_right;
         self.init_vectors();
+        self.psi_f = vec![0.0; self.n];
+        self.psi_0 = 0.0;
     }
 }
 

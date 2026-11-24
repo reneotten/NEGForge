@@ -23,8 +23,12 @@ class IVCurve:
     [`Device.sweep_v_ds`])."""
 
     def __init__(self, voltage, current):
-        self.voltage = np.asarray(voltage)
-        self.current = np.asarray(current)
+        self.voltage = np.asarray(voltage, dtype=float)
+        self.current = np.asarray(current, dtype=float)
+        if self.voltage.ndim != 1 or self.current.ndim != 1 or self.voltage.shape != self.current.shape:
+            raise ValueError("voltage and current must be matching one-dimensional arrays")
+        if not np.isfinite(self.voltage).all():
+            raise ValueError("voltages must be finite")
 
     def __iter__(self):
         return iter((self.voltage, self.current))
@@ -34,14 +38,20 @@ class IVCurve:
 
     def subthreshold_swing(self, v_min: float = 0.0, v_max: float = 0.4) -> float:
         """Subthreshold swing from a `log10(I)` vs voltage linear fit over
-        `[v_min, v_max]`, matching `plot_Vg_I`'s `polyfit` step in the
-        original MATLAB code."""
+        `[v_min, v_max]`."""
         mask = (self.voltage >= v_min) & (self.voltage <= v_max)
         if mask.sum() < 2:
             raise ValueError("not enough points in [v_min, v_max] to fit a swing")
-        log_i = np.log10(self.current[mask])
-        slope, _ = np.polyfit(self.voltage[mask], log_i, 1)
-        return 1.0 / slope
+        voltage, current = self.voltage[mask], self.current[mask]
+        if not np.isfinite(voltage).all() or not np.isfinite(current).all() or (current <= 0).any():
+            raise ValueError("swing requires finite voltages and strictly positive finite currents")
+        if np.ptp(voltage) == 0 or np.ptp(current) == 0:
+            raise ValueError("swing requires varying voltage and current")
+        log_i = np.log10(current)
+        slope, _ = np.polyfit(voltage, log_i, 1)
+        if not np.isfinite(slope) or slope <= np.finfo(float).eps:
+            raise ValueError("swing requires a positive, resolvable slope")
+        return float(1.0 / slope)
 
 
 class Device:
@@ -67,8 +77,7 @@ class Device:
     # -- electrostatics ----------------------------------------------------
 
     def calc_potential(self) -> "Device":
-        """Decoupled electrostatic solve (`rho` unchanged). Matches the
-        original `calc_potential()`."""
+        """Decoupled electrostatic solve (`rho` unchanged)."""
         self._inner.calc_potential()
         return self
 
@@ -78,32 +87,60 @@ class Device:
         tolerance: float = 1e-6,
         mixing: float = 0.3,
         eta: float = 0.08,
+        green_energy_fraction: float = 0.7,
     ) -> tuple[int, float]:
-        """Run the self-consistent Poisson<->NEGF loop (not present in the
-        original MATLAB code — see the top-level README). Returns
+        """Run the self-consistent Poisson<->NEGF loop. Returns
         `(iterations, residual)` on success; raises `RuntimeError` if it
         does not converge within `max_iterations`.
         """
-        return self._inner.solve_self_consistent(max_iterations, tolerance, mixing, eta)
+        return self._inner.solve_self_consistent(
+            max_iterations, tolerance, mixing, eta, green_energy_fraction
+        )
 
     # -- bias control --------------------------------------------------------
 
     def set_v_ds(self, v: float) -> "Device":
+        """Set drain bias, clear charge feedback and recompute decoupled potential."""
         self._inner.set_v_ds(v)
         return self
 
     def set_v_g(self, v: float) -> "Device":
+        """Set gate bias, clear charge feedback and recompute decoupled potential."""
         self._inner.set_v_g(v)
         return self
 
     def set_l_ch(self, l: float) -> "Device":
+        """Resize the grid, clear charge feedback and recompute decoupled potential."""
         self._inner.set_l_ch(l)
         return self
 
     # -- observables -----------------------------------------------------------
 
     def calc_current(self) -> float:
+        """Coherent NEGF/Landauer current through the solved potential, A."""
         return self._inner.calc_current()
+
+    def calc_negf_current(self) -> float:
+        """Explicit name for the coherent current returned by `calc_current`."""
+        return self._inner.calc_negf_current()
+
+    def calc_thermionic_current(self) -> float:
+        """Ideal step-transmission current, A (no tunnelling or reflection).
+
+        This analytic comparator is not the default transport model.
+        """
+        return self._inner.calc_thermionic_current()
+
+    def transmission_spectrum(self, energies) -> np.ndarray:
+        """Dimensionless coherent transmission at 1D input energies in eV.
+
+        Returns a float array with the same shape and order as `energies`.
+        Energies need not be sorted; empty inputs return an empty array.
+        """
+        energies = np.asarray(energies, dtype=float)
+        if energies.ndim != 1 or not np.isfinite(energies).all():
+            raise ValueError("energies must be a finite one-dimensional array")
+        return np.asarray(self._inner.transmission_spectrum(energies.tolist()), dtype=float)
 
     @property
     def psi_f(self) -> np.ndarray:
@@ -135,21 +172,20 @@ class Device:
     def local_density_of_states(self):
         """NEGF sweep at the device's current potential.
 
-        Returns `(energies, ldos)` where `ldos[k]` is the local density of
-        states across all grid sites at `energies[k]`. Matches
-        `calc_green()`'s `G_r_diag` in the original code.
+        Returns energies of shape `(M,)` and spectral values of shape `(M, n)`
+        over the tight-binding band envelope from min(U) to max(U) + 4t_hop
+        in eV. This range is independent of reservoir occupation. Divide
+        the returned `-Im(G_ii)/a` by pi for the per-spin LDOS per unit length.
         """
         energies, ldos = self._inner.local_density_of_states()
         return np.asarray(energies), np.asarray(ldos)
 
     def sweep_v_g(self, v_min: float, v_max: float, step: float, self_consistent: bool = False) -> IVCurve:
-        """Gate-voltage sweep at the device's current drain bias. Matches
-        `plot_Vg_I`."""
+        """Gate-voltage sweep at the device's current drain bias."""
         voltage, current = self._inner.sweep_v_g(v_min, v_max, step, self_consistent)
         return IVCurve(voltage, current)
 
     def sweep_v_ds(self, v_min: float, v_max: float, step: float, self_consistent: bool = False) -> IVCurve:
-        """Drain-voltage sweep at the device's current gate bias. Matches
-        `plot_Vds_I`."""
+        """Drain-voltage sweep at the device's current gate bias."""
         voltage, current = self._inner.sweep_v_ds(v_min, v_max, step, self_consistent)
         return IVCurve(voltage, current)
