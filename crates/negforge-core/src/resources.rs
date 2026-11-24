@@ -51,6 +51,25 @@ pub fn check_working_set(sites: usize, energies: usize) -> Result<()> {
     Ok(())
 }
 
+/// Number of equal midpoint cells of width <= step. An equal-bound window
+/// has no cells; a positive window always has at least one. Invalid numerical
+/// inputs are distinct from genuinely excessive resource requests.
+pub fn midpoint_count(min: f64, max: f64, step: f64) -> Result<usize> {
+    if !min.is_finite() || !max.is_finite() || !step.is_finite() || step <= 0.0 || max < min {
+        return Err(NegForgeError::InvalidParameter(
+            "midpoint bounds must be finite and ordered, step positive and finite".into(),
+        ));
+    }
+    if max == min {
+        return Ok(0);
+    }
+    let count = ((max - min) / step).ceil().max(1.0);
+    if !count.is_finite() || count > MAX_ENERGIES as f64 {
+        return Err(invalid());
+    }
+    Ok(count as usize)
+}
+
 /// Inclusive regularly spaced grid, requiring at least two energy samples.
 /// Validate the floating count before conversion to an integer.
 pub fn energy_count(min: f64, max: f64, step: f64) -> Result<usize> {

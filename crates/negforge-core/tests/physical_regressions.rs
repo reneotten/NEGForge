@@ -175,11 +175,18 @@ fn unbiased_geometry_and_potential_are_mirror_symmetric() {
 }
 
 #[test]
-fn scf_rejects_empty_or_unbounded_energy_windows() {
+fn scf_accepts_a_finite_depleted_initial_iterate() {
     let mut d = small_device();
     d.rho.fill(-1e8);
-    assert!(matches!(
-        solve_self_consistent(&mut d, &SelfConsistentOptions::default()),
-        Err(negforge_core::error::NegForgeError::InvalidParameter(_))
-    ));
+    let opts = SelfConsistentOptions {
+        max_iterations: 100,
+        ..Default::default()
+    };
+    let result = solve_self_consistent(&mut d, &opts).unwrap();
+    assert!(result.residual < 1e-6);
+    assert_eq!(result.electron_density.len(), d.n);
+    assert!(result
+        .electron_density
+        .iter()
+        .all(|n| n.is_finite() && *n >= 0.0));
 }

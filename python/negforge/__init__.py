@@ -172,9 +172,10 @@ class Device:
     def local_density_of_states(self):
         """NEGF sweep at the device's current potential.
 
-        Returns `(energies, ldos)` where `ldos[k]` is the local density of
-        states across all grid sites at `energies[k]`, stored as
-        `-Im(G_ii)/a` (divide by pi for LDOS per unit length).
+        Returns energies of shape `(M,)` and spectral values of shape `(M, n)`
+        over the tight-binding band envelope from min(U) to max(U) + 4t_hop
+        in eV. This range is independent of reservoir occupation. Divide
+        the returned `-Im(G_ii)/a` by pi for the per-spin LDOS per unit length.
         """
         energies, ldos = self._inner.local_density_of_states()
         return np.asarray(energies), np.asarray(ldos)

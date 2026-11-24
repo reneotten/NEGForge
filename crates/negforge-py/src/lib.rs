@@ -25,7 +25,6 @@ fn validate_params(p: &DeviceParams) -> PyResult<()> {
         ("k_ox", p.k_ox),
         ("geo", p.geo),
         ("l_ch", p.l_ch),
-        ("t", p.t),
         ("d_e", p.d_e),
     ] {
         if !value.is_finite() || value <= 0.0 {
@@ -33,6 +32,11 @@ fn validate_params(p: &DeviceParams) -> PyResult<()> {
                 "{name} must be positive and finite"
             )));
         }
+    }
+    if !p.t.is_finite() || p.t < 0.0 {
+        return Err(PyValueError::new_err(
+            "temperature t must be nonnegative and finite",
+        ));
     }
     if ![
         p.e_f, p.e_g, p.v_ds, p.v_g, p.n_dot, p.e_fs, p.l_ds, p.epsilon,
@@ -257,21 +261,36 @@ impl PyDevice {
         ))
     }
 
-    /// Run the NEGF sweep at the device's current potential and return
-    /// `(energies, ldos)` where `ldos[k]` is the local density of states
-    /// row (one value per grid site) at `energies[k]`.
+    /// Available states, not occupied electron density: `(energies, ldos)`
+    /// has shapes `(M,)` and `(M, n)` after Python conversion. `ldos[k][i]`
+    /// is -Im(G_ii)/a; divide by pi for per-spin LDOS in (eV nm)^-1.
+    /// Equal midpoint cells span [min(psi_f), max(psi_f) + 4*t_hop], with
+    /// width <= d_e, independently of reservoir occupation. This finite
+    /// lattice-band envelope excludes eta-broadened tails outside the band.
+    /// Depleted SCF charge can be zero while this spectral grid is nonempty.
     fn local_density_of_states(&self) -> PyResult<(Vec<f64>, Vec<Vec<f64>>)> {
+        self.inner.validate().map_err(to_py_err)?;
         let e_min = self
             .inner
             .psi_f
             .iter()
             .cloned()
             .fold(f64::INFINITY, f64::min);
-        let e_max = 0.7 * self.inner.e_max;
+        let e_max = self
+            .inner
+            .psi_f
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max)
+            + 4.0 * self.inner.t_hop;
         let d_e = self.inner.params.d_e;
-        let count = negforge_core::resources::energy_count(e_min, e_max, d_e).map_err(to_py_err)?;
+        let count =
+            negforge_core::resources::midpoint_count(e_min, e_max, d_e).map_err(to_py_err)?;
         negforge_core::resources::check_working_set(self.inner.n, count).map_err(to_py_err)?;
-        let energies: Vec<f64> = (0..count).map(|k| e_min + k as f64 * d_e).collect();
+        let width = (e_max - e_min) / count as f64;
+        let energies: Vec<f64> = (0..count)
+            .map(|k| e_min + (k as f64 + 0.5) * width)
+            .collect();
         let result = negforge_core::negf::green_function_sweep(
             &self.inner,
             &energies,

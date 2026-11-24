@@ -12,6 +12,18 @@ spectral integration checks, and every I–V point. Failed assertions or SCF sol
 stop rendering; missing transport APIs never trigger surrogate curves.
 `--electrostatics-only` is an explicit partial-render option.
 
+Use the [setup instructions](../../README.md#python-package--notebook) to create
+and activate `.venv314`. The CLI selects the headless Agg backend; importing its
+figure helpers leaves the caller's backend unchanged. The notebook explicitly
+selects inline PNG display. Verify actual notebook images in a fresh kernel with:
+
+```bash
+.venv314/bin/python -m pytest -q -s tests/test_notebook.py
+```
+
+The regression requires six executed code cells and five decoded, nonblank
+`image/png` display outputs; existing gallery files cannot satisfy it.
+
 ## 1. Device geometry and electrostatics
 
 ![Geometry and computed potential](01_geometry.png)
@@ -39,7 +51,7 @@ and absorbing eta dependence are separate numerical questions.
 | Electrostatic barrier (eV) | 0.0425140399 |
 | Finite-area SCF barrier (eV) | 0.103121548 |
 | SCF iterations | 85 |
-| SCF residual (eV) | 9.19553812e-08 |
+| SCF residual (eV) | 9.19553811e-08 |
 | Maximum feedback (eV) | 0.0751220087 |
 | Peak charge magnitude (C/m³) | 180086.256 |
 | Implicit unit-area max feedback (eV) | 0 |

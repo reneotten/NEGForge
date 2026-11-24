@@ -95,11 +95,17 @@ impl Default for SelfConsistentOptions {
 pub struct SelfConsistentResult {
     pub iterations: usize,
     pub residual: f64,
+    /// Occupation-integration sweep, not a full spectral/LDOS window. When
+    /// the retained occupation cutoff is <= min(psi_f), energies and all
+    /// energy-indexed rows are empty. This does not imply no available states.
     pub green: GreenFunctionResult,
+    /// Per-spin linear density, always one value per site (including zero
+    /// values for an empty charge window). At finite T, zero here reflects
+    /// cutoff truncation, not mathematically vanishing Fermi tails.
     pub electron_density: Vec<f64>,
 }
 
-fn negf_energy_grid(device: &Device, fraction: f64) -> Result<Vec<f64>> {
+fn negf_energy_window(device: &Device, fraction: f64) -> Result<(f64, f64)> {
     let e_min = device.psi_f.iter().cloned().fold(f64::INFINITY, f64::min);
     // Fractional truncation acts on a span, never on an absolute energy:
     // shifting all potentials and reservoir energies must shift this grid.
@@ -109,12 +115,24 @@ fn negf_energy_grid(device: &Device, fraction: f64) -> Result<Vec<f64>> {
     let e_max = (e_min + fraction * (device.e_max - e_min))
         .max(mu_high)
         .min(band_top);
-    let d_e = device.params.d_e;
-    let count = crate::resources::energy_count(e_min, e_max, d_e)?;
+    if !e_min.is_finite() || !e_max.is_finite() || !device.e_max.is_finite() {
+        return Err(NegForgeError::InvalidParameter(
+            "non-finite SCF energy window".into(),
+        ));
+    }
+    // No contact-injected charge is retained when the occupation cutoff lies
+    // below the entire device band. This is depletion, not a resource failure.
+    Ok((e_min, e_max.max(e_min)))
+}
+
+fn negf_energy_grid(device: &Device, fraction: f64) -> Result<Vec<f64>> {
+    let (e_min, e_max) = negf_energy_window(device, fraction)?;
+    let count = crate::resources::midpoint_count(e_min, e_max, device.params.d_e)?;
+    if count == 0 {
+        return Ok(Vec::new());
+    }
     crate::resources::check_working_set(device.n, count)?;
-    // Reuse the conservatively checked count as the number of midpoint cells.
-    // Their width is <= d_e and covers the complete window without sampling
-    // its singular band-edge endpoint or rounding away the final partial cell.
+    // Equal midpoint cells cover the window, including a sub-d_e window.
     let width = (e_max - e_min) / count as f64;
     Ok((0..count)
         .map(|k| e_min + (k as f64 + 0.5) * width)
@@ -161,21 +179,30 @@ pub fn solve_self_consistent(
             ));
         }
         let energies = negf_energy_grid(device, opts.green_energy_fraction)?;
-        // The SCF grid contains equal-width midpoint cells, not endpoint
-        // endpoint rectangles with weight params.d_e.
-        let quadrature_width = energies[1] - energies[0];
+        // Use the cell width, not spacing between samples: there may be
+        // zero or one samples. Empty occupation windows still solve Poisson.
+        let (e_min, e_max) = negf_energy_window(device, opts.green_energy_fraction)?;
+        let quadrature_width = if energies.is_empty() {
+            0.0
+        } else {
+            (e_max - e_min) / energies.len() as f64
+        };
         let green = negf::green_function_sweep(device, &energies, opts.eta);
-        let n_electron = charge::electron_density(
-            &green,
-            device.t_hop,
-            device.params.a,
-            device.psi_f[0],
-            device.psi_f[device.n - 1],
-            device.params.e_fs,
-            device.e_fd,
-            device.params.t,
-            quadrature_width,
-        );
+        let n_electron = if energies.is_empty() {
+            vec![0.0; device.n]
+        } else {
+            charge::electron_density(
+                &green,
+                device.t_hop,
+                device.params.a,
+                device.psi_f[0],
+                device.psi_f[device.n - 1],
+                device.params.e_fs,
+                device.e_fd,
+                device.params.t,
+                quadrature_width,
+            )
+        };
 
         if n_electron.len() != device.n || !n_electron.iter().all(|v| v.is_finite() && *v >= 0.0) {
             return Err(NegForgeError::InvalidParameter(
@@ -249,6 +276,41 @@ mod tests {
         });
         device.psi_f.fill(-0.2);
         device
+    }
+
+    #[test]
+    fn depleted_97_site_devices_converge_with_empty_charge_window() {
+        for (v_g, t) in [(0.0, 0.0), (0.0, 10.0), (-2.0, 300.0)] {
+            let mut device = Device::new(DeviceParams {
+                a: 0.5,
+                l_ch: 40.0,
+                l_ds: 4.0,
+                auto_size_contacts: false,
+                d_e: 0.001,
+                v_g,
+                t,
+                ..Default::default()
+            });
+            assert_eq!(device.n, 97);
+            let result = solve_self_consistent(&mut device, &SelfConsistentOptions::default())
+                .unwrap_or_else(|e| panic!("v_g={v_g}, T={t}: {e}"));
+            assert_eq!(result.electron_density, vec![0.0; 97]);
+            assert!(result.green.energies.is_empty());
+            assert!(result.green.g_diag.is_empty());
+            assert!(result.residual < 1e-6);
+        }
+    }
+
+    #[test]
+    fn scf_positive_substep_window_has_one_midpoint() {
+        let mut device = window_device();
+        device.psi_f.fill(0.0);
+        device.params.e_fs = 0.0002;
+        device.e_fd = 0.0002;
+        device.e_max = 0.0002;
+        let energies = negf_energy_grid(&device, 1.0).unwrap();
+        assert_eq!(energies.len(), 1);
+        assert!((energies[0] - 0.0001).abs() < 1e-14);
     }
 
     #[test]

@@ -63,7 +63,7 @@ when using an older version. PyO3 0.30.1 supports 3.14 natively: do not set
 `PYO3_USE_ABI3_FORWARD_COMPATIBILITY` or use an older interpreter as a bypass.
 
 ```bash
-python3.14 -m venv .venv && source .venv/bin/activate
+python3.14 -m venv .venv314 && source .venv314/bin/activate
 python -m pip install --upgrade pip
 python -m pip install "maturin>=1.9.4,<2.0"
 maturin build --release --locked --interpreter "$(command -v python)" --out target/wheels/cp314
@@ -194,14 +194,21 @@ predictions.
 - Unit regressions cover analytic per-spin chain occupation, evanescent
   lead shifts, near-pole diagonal stability, and zero/tiny-pivot solvers.
 - `tests/test_python.py` — installed Python API and validation regressions.
-- `notebooks/negforge_demo.ipynb` — execute explicitly to verify the frontend;
-  Rust tests alone do not exercise the extension or notebook.
+- `tests/test_notebook.py` — fresh-kernel frontend regression using the active
+  Python interpreter. Executes all six cells and requires exactly five decoded,
+  nonblank `image/png` display outputs (not merely saved gallery artifacts).
+  Also checks that importing the gallery preserves the caller's backend.
+  Requires the optional notebook dependencies; Rust tests alone do not exercise
+  the extension or notebook.
 
 ```bash
 cargo test --locked -p negforge-core
 cargo test --locked --workspace
 # In the activated environment, after building/installing the extension:
 python -m pytest -q tests
+# Focused frontend check; prints the five-image count:
+python -m pytest -q -s tests/test_notebook.py
+# Optional executed copy (nbconvert alone does not assert rich image outputs):
 jupyter nbconvert --to notebook --execute notebooks/negforge_demo.ipynb \
   --output negforge_demo.executed.ipynb --output-dir "$TMPDIR"
 ```

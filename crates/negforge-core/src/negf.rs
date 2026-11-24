@@ -113,7 +113,9 @@ pub fn green_function_sweep(device: &Device, energies: &[f64], eta: f64) -> Gree
     assert!(device.psi_f.iter().all(|p| p.is_finite()));
     assert!(device.t_hop.is_finite() && device.t_hop > 0.0);
     assert!(device.params.a.is_finite() && device.params.a > 0.0);
-    crate::resources::check_working_set(device.n, energies.len())
+    // Empty sweeps have no rows but still require valid sites and budgeted
+    // scratch. Conservatively check one row; do not relax global limits.
+    crate::resources::check_working_set(device.n, energies.len().max(1))
         .expect("NEGF grid exceeds practical resource budget");
     let n = device.n;
     let t = device.t_hop;

@@ -918,9 +918,9 @@ verification step, not implied by a passing Rust suite.
 | `Σ_S`, `Σ_D` | Contact retarded self-energies | eV |
 | `Γ_S`, `Γ_D` | Contact broadening functions, `-2 Im(Σ)` | eV |
 | `G^r` | Retarded Green's function | eV⁻¹ (energy-domain) |
-|| `f_S`, `f_D` | Source/drain Fermi-Dirac occupation | dimensionless |
-|| `T(E)`, `mathcal T(E)` | Coherent Caroli transmission probability | dimensionless |
-|| `I` | Spin-degenerate single-mode current | A (not current per width) |
+| `f_S`, `f_D` | Source/drain Fermi-Dirac occupation | dimensionless |
+| `T(E)`, `mathcal T(E)` | Coherent Caroli transmission probability | dimensionless |
+| `I` | Spin-degenerate single-mode current | A (not current per width) |
 | `k_B`, `h`, `ħ`, `e`, `m_e` | Physical constants (`constants.rs`) | SI |
 | `ρ`, `rho` | Charge density fed into the Poisson solve | C/m³ |
 | `n(x)` | Per-spin, single-orbital linear electron density from NEGF | nm⁻¹ (`electron_density`'s return value) |

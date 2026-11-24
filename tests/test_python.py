@@ -108,7 +108,7 @@ def test_notebook_code_is_valid_python():
             compile("".join(cell["source"]), f"notebook-cell-{index}", "exec")
 
 
-@pytest.mark.parametrize("kwargs", [{"d_e": -0.01}, {"t": 0}, {"v_g": float("nan")}, {"epsilon": 1.0}])
+@pytest.mark.parametrize("kwargs", [{"d_e": -0.01}, {"t": -1}, {"v_g": float("nan")}, {"epsilon": 1.0}])
 def test_constructor_rejects_invalid_parameters(kwargs):
     with pytest.raises(ValueError):
         Device(**kwargs)

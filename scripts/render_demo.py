@@ -12,7 +12,9 @@ from pathlib import Path
 import sys
 
 import matplotlib
-matplotlib.use("Agg")
+# Backend selection belongs to the CLI, never to an imported figure library.
+if __name__ == "__main__":
+    matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from matplotlib.patches import Rectangle
@@ -280,6 +282,18 @@ functions. `sanity_checks.json` contains inputs, solver residuals, LDOS statisti
 spectral integration checks, and every I–V point. Failed assertions or SCF solves
 stop rendering; missing transport APIs never trigger surrogate curves.
 `--electrostatics-only` is an explicit partial-render option.
+
+Use the [setup instructions](../../README.md#python-package--notebook) to create
+and activate `.venv314`. The CLI selects the headless Agg backend; importing its
+figure helpers leaves the caller's backend unchanged. The notebook explicitly
+selects inline PNG display. Verify actual notebook images in a fresh kernel with:
+
+```bash
+.venv314/bin/python -m pytest -q -s tests/test_notebook.py
+```
+
+The regression requires six executed code cells and five decoded, nonblank
+`image/png` display outputs; existing gallery files cannot satisfy it.
 
 ## 1. Device geometry and electrostatics
 
