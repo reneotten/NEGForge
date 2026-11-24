@@ -49,8 +49,8 @@ class IVCurve:
             raise ValueError("swing requires varying voltage and current")
         log_i = np.log10(current)
         slope, _ = np.polyfit(voltage, log_i, 1)
-        if not np.isfinite(slope) or abs(slope) <= np.finfo(float).eps:
-            raise ValueError("swing is undefined for a zero or nonfinite slope")
+        if not np.isfinite(slope) or slope <= np.finfo(float).eps:
+            raise ValueError("swing requires a positive, resolvable slope")
         return float(1.0 / slope)
 
 

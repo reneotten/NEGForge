@@ -72,7 +72,7 @@ def test_subthreshold_swing_known_exponential():
     assert IVCurve(voltage, 10 ** (voltage / 0.06)).subthreshold_swing() == pytest.approx(0.06)
 
 
-@pytest.mark.parametrize("current", [[0, 1, 2], [-1, 1, 2], [1, np.nan, 2], [1, np.inf, 2], [1, 1, 1]])
+@pytest.mark.parametrize("current", [[0, 1, 2], [-1, 1, 2], [1, np.nan, 2], [1, np.inf, 2], [1, 1, 1], [100, 10, 1]])
 def test_subthreshold_swing_rejects_undefined_fit(current):
     with pytest.raises(ValueError):
         IVCurve([0, 0.1, 0.2], current).subthreshold_swing()
