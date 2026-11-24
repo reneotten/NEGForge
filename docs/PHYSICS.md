@@ -19,9 +19,8 @@ read start to finish.
 
 | Code | What it is | Covered in |
 |---|---|---|
-| `legacy_matlab/aufgabe1e.m`, `simulation.m` | Original electrostatics-only MATLAB scripts | Part I |
-| `crates/negforge-core/src/tridiag.rs` | Thomas-algorithm tridiagonal solvers | Part I.4 |
-| `crates/negforge-core/src/device.rs` | Electrostatics (`calc_potential`) + ballistic current (`calc_current`) | Parts I, II |
+| `crates/negforge-core/src/tridiag.rs` | Adjacent-partial-pivoting tridiagonal solvers | Part I.4 |
+| `crates/negforge-core/src/device.rs` | Electrostatics (`calc_potential`), coherent current (`calc_current`), thermionic comparator (`calc_thermionic_current`) | Parts I, II |
 | `crates/negforge-core/src/negf.rs` | Tight-binding Hamiltonian, contact self-energies, retarded Green's function | Part III |
 | `crates/negforge-core/src/charge.rs` | NEGF-derived electron density | Part IV |
 | `crates/negforge-core/src/selfconsistent.rs` | Poisson↔NEGF fixed-point loop | Part V |
@@ -71,16 +70,17 @@ the electrostatic potential energy `φ(x)` along the device, because it is
 what opens or closes the channel to current, and — the point of this whole
 codebase — it becomes the on-site potential energy in the NEGF Hamiltonian
 (Part III), and is in turn corrected by the charge density NEGF computes
-(Part V). This chapter covers the electrostatics alone, exactly as
-`legacy_matlab/aufgabe1e.m` and `simulation.m` implement it (a **linear**,
-1-D reduced Poisson solve, `rho = 0`, no NEGF yet) — the ingredient the
-rest of the document builds on.
+(Part V). This chapter covers the linear reduced Poisson solve at fixed
+charge density, the electrostatic ingredient of the coupled model.
 
 ## I.2 From 3-D electrostatics to a 1-D ODE: the natural length λ
 
-The exact problem is 2-D (or 3-D) Poisson's equation inside the
-semiconductor body, with boundary conditions set by capacitive coupling to
-the gate through the oxide:
+**Continuum derivation (SI voltage convention):** in this subsection only,
+`phi` denotes electrostatic voltage in V and lengths are in m. At §I.3 we
+switch to the code's electron potential energy in eV and nm grid, explicitly
+changing the source sign and scale. The exact problem is 2-D (or 3-D)
+Poisson's equation inside the semiconductor body, with boundary conditions
+set by capacitive coupling to the gate through the oxide:
 
 $$\nabla^2 \phi(x,y) = -\frac{\rho(x,y)}{\varepsilon_0 \varepsilon_{si}}$$
 
@@ -121,9 +121,8 @@ drain-induced barrier lowering (DIBL). `λ` is therefore the single number
 that tells you, for a given `t_ch`/`t_ox`/gate geometry, how short a
 channel can be made before electrostatic control degrades — which is why
 the source/drain extension regions are sized as multiples of `λ`
-(`d_S = d_D = 5·λ` in `aufgabe1e.m`; `l_ds = floor(lambda)*15` in
-`quantumsim.m`/`device.rs`) — far enough that the boundary is effectively
-in the "gate has full control" regime.
+(`l_ds = floor(lambda)*15` for automatically sized contacts in
+`device.rs`), so boundaries lie far from the channel.
 
 **Validity.** This is a thin-body approximation: it assumes the transverse
 potential profile is well-described by a single parabola, which holds when
@@ -148,7 +147,14 @@ grid-point potentials, where `A` is tridiagonal (`-2/a²` on the diagonal,
 every diagonal entry — `device::Device::laplacian` builds exactly this),
 and
 
-$$b_i = \frac{1}{\varepsilon_0\varepsilon_{si}}\rho_i - \frac{\phi_{g,i} + \phi_{bi,i}}{\lambda^2}$$
+$$b_i = \frac{10^{-18}(\rho_i+N_{dot})}{\varepsilon_0\varepsilon_{si}} - \frac{\phi_{g,i} + \phi_{bi,i}}{\lambda^2}$$
+
+Here `phi` denotes electron potential energy in eV, not voltage. The
+continuum voltage Poisson equation above is a derivation in SI units;
+for electron energy `U/e=-V` its charge-source sign reverses to positive.
+The factor `1e-18` converts the SI source (V/m²) to the nm⁻² operator's
+units. A negative electronic charge therefore raises the electron-energy
+barrier. `rho` and `N_dot` are both C/m³.
 
 (`device::Device::calc_potential` assembles this right-hand side and calls
 the tridiagonal solver).
@@ -160,19 +166,27 @@ so there's no field left." This is implemented with the classic
 ghost-point trick: reflecting the mirror point `φ_{-1} = φ_1` across the
 boundary turns the stencil at the edge from `(φ_2 - 2φ_1 + φ_0)` into
 `(2φ_2 - 2φ_1)`, i.e. doubling the corner off-diagonal entry of `A`
-(`sup[0] = sub[n-2] = 2/a²` in `Device::laplacian`, matching `ddx2(1,2)=2` /
-`ddx2(N,N-1)=2` in `aufgabe1e.m`).
+(`sup[0] = sub[n-2] = 2/a²` in `Device::laplacian`).
 
-## I.4 Tutorial: the Thomas algorithm for tridiagonal systems
+## I.4 Tutorial: Thomas elimination and the implemented pivoted solver
+
+**Educational derivation:** the formulas below describe *unpivoted*
+Thomas elimination, which requires nonzero, adequately sized reduced
+pivots. The production `solve_real` and `solve_complex` instead use
+**adjacent partial pivoting**: compare the diagonal pivot with the
+subdiagonal and interchange adjacent rows when needed. This introduces
+at most a second superdiagonal, retaining O(N) storage and work while
+handling nonsingular systems with zero or tiny leading pivots. Empty
+and scalar systems are supported; dimension mismatches and exactly
+singular systems panic. These APIs do not estimate conditioning.
 
 `A φ = b` is an `N×N` system, but `A` is tridiagonal (only 3 nonzero
 diagonals). Solving it with general-purpose Gaussian elimination costs
 `O(N^3)`; because a tridiagonal matrix only has `O(N)` nonzero entries to
 begin with, a specialized elimination — the **Thomas algorithm** — solves
-it in `O(N)`. This is what `tridiag::solve_real` (and its complex
-counterpart `solve_complex`, reused by the NEGF module in Part III)
-implements, and it's worth understanding once since it recurs throughout
-the codebase.
+it in `O(N)`. This motivates `tridiag::solve_real` and its complex
+counterpart `solve_complex`, reused in Part III; their implemented
+pivoting extension is described above.
 
 Write the system as, for each row `i`:
 
@@ -199,81 +213,24 @@ $$x_{N-1} = d'_{N-1}, \qquad x_i = d'_i - c'_i\, x_{i+1}$$
 Both passes are a single `O(N)` loop, so the whole solve is `O(N)` — this
 is what makes it practical to call `calc_potential` once per
 self-consistent iteration (Part V) without the electrostatics solve itself
-becoming the bottleneck. `solve_complex` is the identical algorithm with
-complex diagonal entries and right-hand side, used in Part III for the
-NEGF Green's-function columns.
+becoming the bottleneck. The production complex solver applies the
+pivoted variant with complex arithmetic to the NEGF boundary columns.
 
 **Validated by:** `tridiag::tests::thomas_matches_dense_gaussian_elimination`
 cross-checks this against a dense (`O(N^3)`) Gaussian-elimination reference
-on a 12-site random system.
+on a 12-site system. Separate pivoting regressions exercise zero/tiny
+leading pivots, complex residuals, and empty/scalar cases.
 
-## I.5 Code walkthrough: the original MATLAB scripts
+## I.5 Worked example
 
-### I.5.1 `aufgabe1e.m` — dense-matrix version
+`device::DeviceParams::default()` uses `d_ch=5 nm`, `d_ox=5 nm`,
+`k_si=11.2`, `k_ox=3.9`, and `geo=1`:
 
-| Line(s) | What it does |
-|---|---|
-| 1–5 | Physical constants: elementary charge `e`, relative permittivities of the oxide (`eps_ox`, SiO₂ ≈ 3.9) and silicon (`eps_si` ≈ 11.2), and vacuum permittivity `eps_0`. |
-| 7–8 | Bias point: `V_ds` = drain-source voltage, `V_g` = gate voltage. |
-| 10–13 | Device geometry in nm: channel thickness `d_ch`, oxide thickness `d_ox`, grid spacing `a` (here 0.01 nm), and the natural length `λ` from §I.2. |
-| 14–15 | Source and drain extension lengths are each `5λ` (§I.2). |
-| 17–20 | Convert physical lengths to grid-point counts (`N_S`, `N_ch`, `N_D`) and total grid size `N`. |
-| 22–24 | Bandgap `E_g` (1.12 eV, silicon), reference Fermi level `E_f = 0`, and `phig = V_g`. |
-| 26–27 | `phi_g`: nonzero only over the channel indices — the gate only overlaps the channel. |
-| 28–30 | `phi_bi`: the channel's built-in potential is mid-gap (`E_f + E_g/2`), the drain region is offset by `-V_ds`. |
-| 31 | `rho = 0`: no free/dopant charge in this script — a fully linear solve. |
-| 33–36 | Build the tridiagonal `-2 - 1/λ²` / `+1` matrix from §I.3, with the Neumann ghost-point correction in the two corners. |
-| 38 | Assemble the right-hand side `b` from §I.3. |
-| 40 | Solve `A φ = b` directly (`\`, dense LU). |
-| 41–42 | Plot the resulting potential profile and print its maximum (the barrier height). |
+$$\lambda=\sqrt{(11.2/3.9)\,5\,5}\ \mathrm{nm}. $$
 
-### I.5.2 `simulation.m` — sparse-matrix version with doping
-
-A cleaned-up, more general rewrite of the same physics:
-
-- **Fixed grid size, derived spacing.** Fixes `N = 500` grid points and
-  derives spacing `a = l_g / (N-1)` from the total device length
-  `l_g = 2·l_ds + l_ch` — the more numerically convenient direction to work
-  in, since it gives direct control over matrix size / runtime.
-- **Sparse assembly.** The same tridiagonal Laplacian is built with
-  `spdiags` instead of `diag` — asymptotically faster and lighter on
-  memory for large `N`.
-- **`geo`, the geometry factor** lets you model a double-gate or wrap-gate
-  device by changing a single number — a wrap-gate (cylindrical,
-  gate-all-around) geometry couples to the channel more strongly than a
-  planar single gate, which shortens `λ` and improves short-channel
-  control for the same `t_ch`/`t_ox`.
-- **`N_dot`, dopant charge density** is a placeholder for fixed
-  ionized-dopant charge on the Poisson right-hand side — `0` in the
-  default parameters (an undoped body). This is the field the
-  self-consistent loop's NEGF-computed mobile charge is added alongside
-  (Part V).
-- Region assignment mirrors `aufgabe1e.m`: source grounded/zero, channel
-  carries `-V_g` and mid-gap `φ_bi`, drain carries `-V_ds`.
-
-## I.6 Worked numeric example
-
-Plugging in `aufgabe1e.m`'s defaults (`eps_si=11.2`, `eps_ox=3.9`,
-`d_ch=20 nm`, `d_ox=1 nm`):
-
-$$\lambda = \sqrt{\frac{11.2}{3.9}\times 20 \times 1}\ \text{nm} \approx 7.58\ \text{nm}$$
-
-so the source/drain extensions `d_S = d_D = 5λ ≈ 37.9 nm`, and with the
-0.01 nm grid spacing the script builds roughly 9,600 grid points.
-
-Physically: a 20 nm-thick, single-gated silicon body with a 1 nm oxide has
-quite poor electrostatic control (`λ` is large relative to typical modern
-channel lengths of 10–20 nm) — this is exactly why real advanced nodes use
-thin bodies (small `t_ch`) and/or multiple gates (larger `g`) to shrink `λ`
-and keep short-channel effects under control: halving `d_ch` to 10 nm
-shrinks `λ` to ≈ 5.36 nm (a ~30% reduction), and moving to a double gate
-(`g=2`) shrinks it by a further factor of `√2`.
-
-`simulation.m`'s defaults (`k_Si=11.68`, `k_ox=3.9`, `d_ch=10 nm`,
-`d_ox=1 nm`, `geo=1`) give `λ ≈ 5.47 nm`, with `l_g = 30 nm` spread over
-`N=500` points (`a ≈ 0.0601 nm`), placing the channel roughly between grid
-indices 166 and 334. `device::DeviceParams::default()` (`d_ch=5 nm,
-d_ox=5 nm, k_si=11.2, k_ox=3.9`) gives `λ = sqrt(11.2/3.9*5*5) ≈ 8.47 nm`.
+Reducing body or oxide thickness, or increasing the geometry factor,
+shortens the natural length and improves gate control at a fixed channel
+length. The automatically sized contacts extend well beyond this scale.
 
 **What the potential profile means.** With `V_g = 0` and `V_ds > 0` you
 should see: a flat, low region in the source, a barrier peak under the
@@ -293,111 +250,148 @@ junctions by the `1/λ²` coupling to the drain), and a step down to
   rounded peak — the discretized signature of losing electrostatic
   control.
 
-## I.7 A caveat in the original two scripts (not in `quantumsim.m` or the Rust port)
-
-In `aufgabe1e.m` and `simulation.m`, the finite-difference Laplacian is
-assembled as `(-2 - 1/λ², +1, +1)` **without dividing by `a²`**
-(`aufgabe1e.m` even has this spelled out and commented out:
-`%ddx2 = ddx2./a^2;`). The consistent discretization of §I.3 requires the
-off-diagonal `+1` entries (and the whole matrix) scaled by `1/a²` relative
-to the `-1/λ²` term. As written, those two scripts implicitly assume
-`a = 1` (nm) in the balance between the second-derivative term and the
-`1/λ²` term, even though `a` is set much finer (`0.01 nm` /
-`≈0.06 nm`) — worth fixing, or deliberately confirming via a
-grid-refinement/convergence test, before relying on their `φ_f` for
-quantitative work.
-
-**This does not affect `quantumsim.m` or the Rust rewrite.**
-`quantumsim.m`'s `get_laplacian()` divides by `self.a.^2` explicitly
-(`self.L_sparse = spdiags(...)/self.a.^2`), and `device::Device::laplacian`
-scales by `1/a²` throughout (`inv_a2 = 1.0/a.powi(2)`) with the `1/λ²`
-term left unscaled — the consistent discretization — which is what the
-rest of this document (and the Rust engine) is built on.
-
 ---
 
-# Part II — Ballistic current: the Landauer formula
+# Part II — Coherent current: the Landauer–Caroli formula
 
-## II.1 Physics
+## II.1 Physics and default current
 
-Once the electrostatic barrier `φ_f(x)` is known, the simplest possible
-transport model treats the channel as **ballistic**: an electron injected
-from a reservoir either sails over the top of the barrier unimpeded, or is
-reflected — no scattering, no tunneling. This is the "top-of-the-barrier"
-model (Lundstrom & Guo), a special case of the general Landauer–Büttiker
-formula
+At a fixed potential profile `psi_f(x)`, `Device::calc_current` evaluates
+coherent two-terminal transport through the tight-binding Hamiltonian of
+Part III. The default is **not** a step at the maximum barrier. Elastic
+reflection, sub-barrier tunneling, and quantum interference are included
+through the energy-dependent **Caroli transmission**:
 
-$$I = \frac{2e}{h}\int T(E)\,\big[f_S(E) - f_D(E)\big]\,dE$$
+$$\mathcal T(E)=\operatorname{Tr}[\Gamma_S G^r\Gamma_D G^a]
+=\Gamma_S(E)\Gamma_D(E)\,|G^r_{1N}(E)|^2.$$
 
-with the transmission `T(E)` collapsed to a step function: `T(E) = 1` for
-`E` above the barrier top `psi_0 = max(φ_f)`, `T(E) = 0` below it. `f_S`,
-`f_D` are Fermi-Dirac occupations of the source/drain reservoirs at their
-own electrochemical potentials:
+The scalar expression applies to this single-orbital chain with contacts
+attached at its endpoints. `G^a=(G^r)^\dagger` and
+`Gamma_alpha=-2 Im(Sigma_alpha)`; the contact broadenings vanish outside
+the respective lead's propagating band. Thus end-to-end transmission
+requires propagating states in **both** leads. Evanescent states within
+the device still mediate tunneling through a barrier.
 
-$$f_{S,D}(E) = \frac{1}{\exp\!\left(\dfrac{E - E_{fS,fD}}{k_B T}\right) + 1}$$
+The spin-degenerate Landauer current is
 
-with `E_fS = e_fs` (a fixed parameter) and `E_fD = -V_ds + 0.05` (the drain
-Fermi level tracks the applied bias, offset by a fixed reference used
-throughout the original coursework code). The prefactor `2e/h` is the
-single-mode Landauer conductance quantum — the `2` is spin degeneracy, `e`
-and `h` the elementary charge and Planck constant.
+$$I=\frac{2e^2}{h}\int_{\text{energy in eV}}
+\mathcal T(E)\,[f_S(E)-f_D(E)]\,dE,$$
 
-**Validity.** Good only when the channel is short compared to the carrier
-mean free path (no scattering) — real devices lose current to
-phonon/impurity/surface-roughness scattering, so this overestimates
-on-current. Excluding sub-barrier tunneling also underestimates
-subthreshold current. Both are standard, deliberate simplifications for a
-first compact model, not oversights.
+where `f_alpha(E)=1/[exp((E-mu_alpha)/theta)+1]`,
+`theta=k_B T/e` in eV, `mu_S=e_fs`, and `mu_D=e_fs-v_ds`.
+At zero temperature these are Fermi steps, with half occupation at the
+edge. Positive current corresponds to net source-to-drain electron
+transport in this convention; reversing the reservoir imbalance reverses
+the current. Equal reservoir occupations give zero current.
 
-## II.2 Numerical implementation
+The gate and drain sweeps (`sweep_v_g`, `sweep_v_ds`) use `calc_current` at
+each bias point. Their self-consistency option selects whether the
+potential comes from an electrostatics-only solve or the coupled
+Poisson–NEGF iteration; it does not select a thermionic current model.
 
-`device::Device::calc_current` (mirrors `calc_current()`) approximates the
-integral by a **rectangle rule** over a fixed energy step `d_e`, from
-`psi_0` up to an upper bound `e_max`:
+**Assumptions.** This is a static, single-particle, coherent elastic model
+with ideal equilibrium reservoirs. There is no phonon or impurity
+scattering, dissipative energy relaxation, or conserving dephasing model.
+Elastic scattering from the potential is included, so “ballistic” must
+not be read as unit transmission. The current is for one orbital mode
+with two spins, not a sum over transverse subbands or valleys.
 
-$$I \approx \frac{2e}{h}\, d_e \sum_{k=0}^{n} \big[f_S(E_k) - f_D(E_k)\big], \qquad E_k = \psi_0 + k\cdot d_e$$
+## II.2 Analytic thermionic comparator
 
-`e_max` is chosen so the Fermi functions are numerically negligible past
-it, rather than integrating to infinity: solving
-`f_S(e_max) ≈ epsilon` for a small tolerance `epsilon` gives
+`Device::calc_thermionic_current` is a separate top-of-the-barrier
+comparator. It replaces the actual transmission by
+`T(E)=step(E-psi_0)`, where `psi_0=max(psi_f)`: no tunneling below the
+barrier and perfect transmission above it. Let `theta=k_B T/e` in eV.
+Then
 
-$$e_{max} = E_{fS} - k_B T \ln(\epsilon) / e$$
+$$F(\mu)=\theta\ln\!\left(1+e^{(\mu-\psi_0)/\theta}\right),
+\qquad I_{\mathrm{thermionic}}=\frac{2e^2}{h}
+[F(\mu_S)-F(\mu_D)].$$
 
-(`device::Device::new`'s `e_max = params.e_fs - K_B*T*epsilon.ln()/E`,
-with `epsilon = 10^{-14}` by default — comfortably past the point where
-`f_S` has decayed to numerical noise).
+The softplus is evaluated stably; at `T=0` its exact limit is
+`F(mu)=max(mu-psi_0,0)`. This comparator integrates analytically to infinity
+and is independent of `d_e` and the numerical energy window **at a fixed
+potential**. Those controls can still affect an SCF-derived potential.
+The comparator is not used as the default current in bias sweeps.
 
-## II.3 Units, and a deliberately-inherited quirk
+Differences from coherent current can reflect tunneling, above-barrier
+reflection, resonances, and the finite lead bands of the discretized
+Hamiltonian. The comparator is not a rigorous upper or lower bound on
+coherent current.
 
-Energies in this codebase are in eV throughout (`device.rs`'s module
-docs), so the sum's argument `E_k - E_{fS,fD}` is in eV; the exponent needs
-to be dimensionless, hence the explicit `* E` (elementary charge, used here
-as the eV→Joule conversion factor: 1 eV = `e` Joules) inside the Fermi
-function's exponent, dividing by `K_B * T` (Joules). The final expression
-carries a second `* E` (converting the summed `d_e` — in eV — to Joules,
-so that `2e/h * (Joules)` comes out in Amps) and an additional `* 1e-3`
-whose exact provenance is not derivable from unit analysis alone; it is
-inherited byte-for-byte from `calc_current()`'s
-`I=2*e/h*sum(...)*dE*e*1e-3` and is preserved unchanged here, consistent
-with this rewrite's policy of faithfully porting the original numerics
-except where a bug was specifically identified and fixed (see the
-top-level README's "Deviations" list).
+## II.3 Current units and numerical convergence
+
+The Landauer prefactor `2e/h` assumes the energy integral is in Joules.
+With the numerical energy variable in eV, `dE_J=e*dE_eV` supplies another
+factor of `e`: use **`2e²/h`**, giving current in **amperes**. Transmission
+and Fermi occupations are dimensionless; the factor two counts spin.
+There is no extra `1e-3`, grid-spacing, or device-area factor. This is a
+single-mode current, not A/m or a current density.
+
+The coherent integral must resolve contact band edges, the reservoir
+occupation window (including thermal tails), and narrow transmission
+resonances. Check energy resolution and window coverage independently,
+then refine the spatial grid to check the effective-mass limit. Lead
+band overlap limits the support of the transmission, but does not ensure
+that a chosen quadrature resolves its structure. At low temperature,
+resolve Fermi edges rather than relying on thermal smoothing.
+
+Check sensitivity to any imaginary regularization and the small-broadening
+limit. The finite-device eta used to smooth an SCF density is absorbing
+without compensating injection (§III.4); it must not be interpreted as a
+physical scattering rate or silently substituted for a converged coherent
+flux calculation. An SCF residual below tolerance says nothing by itself
+about current quadrature accuracy. Convergence should be assessed for
+the observables of interest, including subthreshold current, not just
+for a visually smooth LDOS or I–V curve.
+
+## II.4 The SCF density energy window
+
+For the NEGF grid, the stored cutoff in eV is
+`e_max = max(e_fs,e_fd) - theta*ln(epsilon)`, covering the thermal tails
+of both reservoirs also under reverse bias. The SCF integration interval is
+
+```text
+L = min(psi_f)
+mu_high = max(e_fs, e_fd)
+B = max(psi_f[0], psi_f[N-1]) + 4*t_hop
+U = min(B, max(mu_high, L + green_energy_fraction*(e_max-L)))
+```
+
+All terms are energies in eV. A common shift of the potential, both
+chemical potentials and `e_max` translates `[L,U]` without changing the
+occupations or Green's functions. Applying `green_energy_fraction` to an
+absolute energy instead of a span would violate this energy-reference
+invariance. The lower endpoint includes the lead band bottoms; the cap
+`B` removes energies where neither lead injects particles. It does not
+assign occupation to bound states outside the lead continua.
+
+The default fraction `0.7` cannot cut below the higher Fermi level while
+that level lies within the injecting bands, but may truncate thermally
+occupied states above it. Only fraction `1.0` uses the full epsilon-based
+thermal cutoff, and finite `epsilon` controls a Fermi-probability tail,
+not a rigorous density-error bound near resonances. Compare fractions,
+refine `d_e`, and reduce eta separately before trusting the density.
+The finite lattice bandwidth is a property of the discretized model;
+covering it does not establish the continuum effective-mass limit.
 
 ---
 
 # Part III — NEGF: quantum transport via the retarded Green's function
 
-Ballistic transport (Part II) gets the qualitative trend right but throws
-away all quantum interference and resonance structure, and can't produce a
-charge density to feed back into the Poisson solve. NEGF is the more
-complete (still 1D, still effective-mass) treatment that both of those
-things.
+The default coherent current in Part II and the contact-injected charge
+in Part IV use the same tight-binding, open-contact NEGF framework.
+The retarded Green's function describes propagation and spectral
+structure; reservoir occupations then determine net current and charge.
+The analytic thermionic comparator alone discards interference and
+resonance structure.
 
 ## III.1 From the Schrödinger equation to a tight-binding chain
 
 Start from the effective-mass, 1-D time-independent Schrödinger equation
-with the electrostatic potential energy `U(x) = -e\,\phi_f(x)` from Part I
-as the potential term:
+with electron potential energy `U(x)` as the potential term. For an
+electrostatic voltage `V(x)`, `U_J=-e V`; the code already stores
+`psi_f=U_J/e` in eV, so it must not be multiplied by `-e` again:
 
 $$-\frac{\hbar^2}{2m^*}\frac{d^2\psi}{dx^2} + U(x)\,\psi = E\,\psi$$
 
@@ -460,33 +454,30 @@ come out non-negative. Concretely: for a propagating mode
 (`0 < k(E)a < \pi`), `\mathrm{Im}[-t e^{ika}] = -t\sin(ka) \le 0` — good,
 this checks out for the formula above.
 
-**Implementation note.** `negf::green_function_sweep` computes its own
-wavevector via
-`ka_s = acos(-(2*t - E + psi_0s)/(2*t))`, which is algebraically
-`\pi - k(E)a` from the dispersion above (the reflected branch), not
-`k(E)a` directly. Composed with `exp(-i*ka_s)` — as the code does —
-the `\pi` phase from the reflection and the branch flip cancel exactly:
+**Implemented root selection.** Write `epsilon_c=2t+U_contact` and
+`x=(E-epsilon_c)/(2t)`. The surface self-energy obeys
+`Sigma²-(E-epsilon_c)Sigma+t²=0`. The code uses
 
-$$t\, e^{-i\, ka_s} = t\, e^{-i(\pi - k(E)a)} = t\, e^{-i\pi} e^{i k(E) a} = -t\, e^{i k(E) a} = \Sigma(E)$$
+$$\Sigma(E)=\begin{cases}
+tx-it\sqrt{(1-x)(1+x)}, & |x|\le1,\\
+\displaystyle\frac{t}{x+\operatorname{sgn}(x)\sqrt{|x|-1}\sqrt{|x|+1}}, & |x|>1.
+\end{cases}$$
 
-so `sigma_l = t * (-(Complex64::i() * ka_s)).exp()` reproduces the exact
-textbook self-energy, without needing `ka_s` itself to be in the
-"canonical" branch. (An earlier version of this code, and the original
-`quantumsim.m` it was ported from, instead used `exp(+i*ka_s)` — which for
-this same reflected branch gives `\mathrm{Im}(\Sigma) = +t\sin(k(E)a) > 0`,
-backwards from the causality requirement above. That produced a
-local-density-of-states proxy that could go visibly negative — impossible
-for a genuine density of states — confirmed at the broadening used inside
-the self-consistent loop before this was corrected. See
-`negf::tests::contact_self_energy_has_non_positive_imaginary_part_for_propagating_modes`
-and `negf::tests::g_diag_is_non_negative_at_self_consistent_loop_broadening`
-for the regression tests that now guard this.)
+Inside the band this is the causal root; outside **both** band edges it
+is the decaying real root (`|Sigma|<=t`). The rationalized expression
+avoids cancellation far outside the band. An evanescent lead contributes
+a real Hamiltonian shift even though its injection `Gamma` is zero.
+Both self-energies are subtracted from the boundary diagonal, including
+both contributions if a low-level one-site calculation is requested.
 
-Only propagating-band self-energies are applied (`if e >= psi_0s`/`psi_0d`
-in the code); below the contact's own band edge the boundary site keeps its
-bare on-site energy plus only the artificial `iη` broadening (§III.4) — a
-simplification already present in the original model, not something this
-rewrite added or removed.
+**Educational branch identity, not the production root algorithm:**
+returned `ka_s = acos(-(2*t-E+psi_0s)/(2*t))` uses a reflected
+wavevector. Inside the band `ka_s=pi-k(E)a`, hence
+`t exp(-i ka_s)=-t exp(i k(E)a)`. This identity is not used to select
+the production self-energy.
+Outside the band the returned complex wavevector is not a canonical
+physical wavevector. Uniform-chain and one-site regressions test the
+actual assembled operator, in addition to causality and LDOS positivity.
 
 ## III.3 The retarded Green's function, LDOS, and broadening
 
@@ -497,47 +488,65 @@ $$G^r(E) = \big[(E+i\eta)I - H - \Sigma_S(E) - \Sigma_D(E)\big]^{-1}$$
 
 where `η` is a small positive broadening (§III.4) and `Σ_S`, `Σ_D` are
 nonzero only at the source/drain boundary sites. Two derived quantities
-matter for this codebase:
+describe spectral structure and contact coupling:
 
 - **Local density of states**, `D(x,E) = -\mathrm{Im}[G^r_{xx}(E)]/(\pi)`
   (per unit length, hence the extra `/a` the code applies —
   `GreenFunctionResult::g_diag` stores `-\mathrm{Im}(G_{ii})/a`, i.e. the
-  LDOS without the `1/\pi` normalization, matching the original code's
-  convention for what to plot).
+  LDOS without the `1/\pi` normalization).
 - **Broadening / injection**, `\Gamma_{S,D}(E) = -2\,\mathrm{Im}[\Sigma_{S,D}(E)]`,
   which for our contact self-energy (§III.2) works out to
   `\Gamma_{S,D}(E) = 2t\sin(k_{S,D}(E)\,a)` for propagating contact modes —
   this is what drives the charge-density calculation in Part IV.
+
+### Scattering-state LDOS is not transmitted flux
+
+The open-contact Green's function contains scattering states: an incident
+wave can interfere with its reflected wave, producing standing-wave LDOS
+patterns and resonant spectral peaks. Here “scattering” means elastic
+scattering by the device potential, not added phonon or impurity
+self-energies. The physical per-spin LDOS is `g_diag/pi`, in
+`1/(eV nm)`; raw `g_diag` plots omit this factor unless explicitly normalized.
+
+LDOS measures locally available states, not their occupation or direction
+of travel. Even at equilibrium there can be a large LDOS and zero net
+current. Contact-resolved spectral weights `Gamma_alpha*|G_i,alpha|²`
+enter the density with occupations (Part IV), whereas transmitted flux
+uses the end-to-end Caroli expression and the occupation **difference**
+(Part II). A high LDOS resonance need not transmit efficiently if its
+coupling to one contact is weak. Do not interpret LDOS color intensity
+as transmission probability or current density.
 
 ## III.4 The artificial broadening `η`
 
 `η` in `(E+iη)I - H - \Sigma_S - \Sigma_D` is a mathematical device, not a
 physical scattering rate: it nudges the poles of `G^r` off the real axis so
 the matrix stays invertible, in the same spirit as the `+i0^+`
-prescription in the Feynman propagator. `negf::DEFAULT_ETA = 1e-8` matches
-the original `calc_green()`'s hardcoded `eta = 1i*1e-8`, appropriate for a
+prescription in the Feynman propagator. `negf::DEFAULT_ETA = 1e-8` is
+appropriate for a
 one-off local-density-of-states plot at a fixed potential, where you *want*
 to see sharp, well-resolved resonances.
 
-Inside the self-consistent loop (Part V) that small a value is a problem: a
-narrow resonance whose energy happens to land within `η` of one of the
-discrete energy-grid points produces a `|G|^2` spike orders of magnitude
-larger than its neighbors, and feeding that grid-alignment-dependent spike
-back into the electrostatic solve makes the fixed-point iteration diverge
-or oscillate. `SelfConsistentOptions::eta` defaults instead to `0.08` eV —
-several times the energy-grid spacing `d_e` — so each resonance is smeared
-across multiple grid points and the charge estimate varies smoothly
-between iterations. This need is independent of the self-energy sign
-question in §III.2 — re-verified after that fix by sweeping `eta` down to
-`0.005`/`0.01` on the default device, which still fails to converge within
-50 iterations, confirming the requirement is genuinely about resolving
-resonances, not about compensating for a sign error.
+A narrow resonance can be missed or spuriously overweighted by a coarse
+energy grid. `SelfConsistentOptions::eta` defaults to `0.08` eV to smooth
+such resonances. This is **absorbing regularization, not conserving
+dephasing**: eta is applied only to the finite device, while lead
+self-energies use real energy with the retarded `0+` prescription. There
+is no matching lesser/in-scattering self-energy for eta. Consequently
+finite eta removes occupation, changes the evaluated density, and can
+change the SCF fixed point; it is not merely a convergence accelerator.
+
+A successful iteration at default eta does not establish the small-eta
+physical limit. Refine eta, `d_e`, and the energy window separately,
+resolving resonances before drawing quantitative conclusions. Contact-only
+injection also supplies no occupation prescription for true bound states
+disconnected from both lead continua. No universal minimum eta establishes
+physical convergence.
 
 ## III.5 Tutorial: the recursive Green's function (RGF) algorithm
 
 Directly forming and inverting the `N×N` matrix `(E+iη)I - H - \Sigma_S -
-\Sigma_D` (dense Gaussian elimination, as the original `inv()` MATLAB call
-did) costs `O(N^3)` *per energy point*, which is the dominant cost of a
+\Sigma_D` with dense Gaussian elimination costs `O(N^3)` *per energy point*, which is the dominant cost of a
 bias sweep or a self-consistent loop that calls this once per iteration.
 But only two things are actually needed from the full inverse: its
 diagonal (`g_diag`, the LDOS) and its first/last columns (the source/drain
@@ -551,8 +560,8 @@ Lake et al. 1997).
 `col_drain`) are the easy half: the `i`-th column of `M^{-1}` is, by
 definition, the solution `x` of `M x = e_i` for the `i`-th standard basis
 vector. Since `M` is tridiagonal, this is exactly `tridiag::solve_complex`
-from §I.4 — one `O(N)` Thomas-algorithm solve per column, no separate
-derivation needed.
+from §I.4 — one `O(N)` adjacent-partial-pivoting solve per column, no
+separate inverse-column derivation needed.
 
 **The full diagonal** (`negf::full_diagonal`) needs a genuinely different
 technique, since there's no single right-hand side that extracts "the
@@ -569,24 +578,29 @@ to the (already-resolved) chain to its left:
 $$g_{\text{left}}[0] = \frac{1}{\text{diag}_0}, \qquad
 g_{\text{left}}[i] = \frac{1}{\text{diag}_i - t_{i-1}^2\, g_{\text{left}}[i-1]}$$
 
-*Backward sweep* — combine `g_left` with a pass from the far end back to
-site 0, producing the **full** diagonal (accounting for coupling in both
-directions):
+*Right-connected sweep* — independently resolve the chain to the right:
 
-$$\text{full}[N-1] = g_{\text{left}}[N-1], \qquad
-\text{full}[i] = g_{\text{left}}[i] + g_{\text{left}}[i]^2\, t_i^2\, \text{full}[i+1]$$
+$$g_R[N-1]=1/d_{N-1},\qquad g_R[i]=\frac{1}{d_i-t_i^2g_R[i+1]}.$$
 
-The seed is exact for the same reason `g_left[N-1]` is exact for the last
-site alone: there's nothing to the right of site `N-1`, so "left-connected"
-and "fully connected" coincide there. Each subsequent step folds in one
-more site's worth of coupling to the right. Both passes are `O(N)`
-(constant work per site), so the total remains `O(N)` for the whole
-diagonal.
+The implemented **full diagonal** combines both embeddings:
+
+$$G_{ii}=\frac{1}{d_i-t_{i-1}^2g_L[i-1]-t_i^2g_R[i+1]},$$
+
+omitting the nonexistent left/right term at the endpoints. Here `d_i`
+is the diagonal of the matrix being inverted. Both sweeps and the final
+combination are O(N).
+
+**Educational identity (not used in production):** the equivalent
+backward reconstruction `full[i]=g_L[i]+g_L[i]^2*t_i^2*full[i+1]`, seeded
+by `full[N-1]=g_L[N-1]`, is exact algebraically but can catastrophically
+cancel near a pole of a truncated chain. The two-connected-sweep
+implementation avoids that reconstruction; the near-connected-pole
+regression checks this stability improvement against a dense inverse.
 
 **Validated by:** `negf::tests::recursive_diagonal_matches_dense_inverse`
 and `negf::tests::boundary_columns_match_dense_inverse` cross-check both
 pieces above against a dense (`O(N^3)`) Gauss-Jordan matrix inversion on a
-9-site random complex tridiagonal system, to within `1e-8` relative
+9-site deterministic complex tridiagonal system, to within `1e-8` absolute
 tolerance — the appropriate way to validate a recursive numerical identity
 like this one, and the reason this document states the recursion rather
 than re-deriving the (slightly intricate) exact equivalence between the
@@ -599,17 +613,22 @@ For each energy `E` in the caller-supplied grid:
 1. Compute the contact wavevectors `ka_s`, `ka_d` (§III.2) — complex in
    general, real only inside each contact's propagating band.
 2. Build the bulk diagonal `(E+iη) - (2t + \psi_f(x_i))` for every site.
-3. If `E` is above each contact's own band edge, overwrite that boundary
-   site's diagonal entry with the self-energy-corrected version (§III.2).
+3. Subtract both contact self-energies (§III.2) at all energies, retaining
+   the real evanescent shifts below and above the propagating bands.
 4. Get the full diagonal via the RGF sweep (§III.5) → `g_diag`.
 5. Solve for the source/drain-injected columns via two tridiagonal solves
    (§III.5) → `g_col_source`, `g_col_drain` (stored as `|G|^2`, the squared
    magnitudes Part IV's charge-injection formula needs).
 
-The energy grid itself is chosen by the caller — the original hardcoded
-`min(Psi_f) : dE : 0.7*E_max` (`negf_energy_grid` in `selfconsistent.rs`
-reproduces this for the self-consistent loop; ad-hoc callers, e.g. for an
-LDOS plot, can choose their own).
+The energy grid is caller-selected. The SCF loop uses the interval in
+§II.4 and equal-width midpoint cells with widths no larger than `d_e`.
+Each sample lies at a cell center; the density sum weights it by the
+actual cell width. This covers the complete selected interval without
+sampling its lower endpoint or discarding a final fractional cell.
+Band edges inside the interval, Fermi steps at zero temperature, and
+narrow resonances still require grid-refinement checks. An LDOS plot can
+use a different caller-selected grid, but is not automatically a density
+quadrature.
 
 ---
 
@@ -618,18 +637,23 @@ LDOS plot, can choose their own).
 ## IV.1 Physics
 
 The **electron density** at position `x` is built from the NEGF
-correlation function `G^<(x,x,E)`, related to the retarded Green's function
-and the contacts' occupation via the standard NEGF result
+positive correlation function `G^n=-iG^<`, related to the retarded
+Green's function and the contacts' occupation via the standard NEGF result
 
-$$G^<(E) = G^r(E)\,\big[\Sigma_S^{in}(E) + \Sigma_D^{in}(E)\big]\,G^a(E), \qquad \Sigma_{S,D}^{in}(E) = \Gamma_{S,D}(E)\, f_{S,D}(E)$$
+$$G^n(E) = G^r(E)\,\big[\Sigma_S^{in}(E) + \Sigma_D^{in}(E)\big]\,G^a(E), \qquad \Sigma_{S,D}^{in}(E) = \Gamma_{S,D}(E)\, f_{S,D}(E)$$
 
 ("in-scattering" from each contact, weighted by that contact's occupation
 `f_{S,D}`, §II.1). For our boundary-only self-energies this reduces to
-`G^<_{xx}(E) = \Gamma_S(E) f_S(E) |G^r_{x,1}(E)|^2 + \Gamma_D(E) f_D(E)
+`G^n_{xx}(E) = \Gamma_S(E) f_S(E) |G^r_{x,1}(E)|^2 + \Gamma_D(E) f_D(E)
 |G^r_{x,N}(E)|^2` — exactly the two `|G|^2` boundary columns Part III
 computed — and the electron density is
 
-$$n(x) = \int \frac{dE}{2\pi}\, G^<_{xx}(E) = \int \frac{dE}{2\pi}\Big[\Gamma_S(E) f_S(E)\, |G^r_{x,1}(E)|^2 + \Gamma_D(E) f_D(E)\, |G^r_{x,N}(E)|^2\Big]$$
+$$n_i = \frac{1}{a}\int \frac{dE}{2\pi}\Big[\Gamma_S(E) f_S(E)\, |G^r_{i,1}(E)|^2 + \Gamma_D(E) f_D(E)\, |G^r_{i,N}(E)|^2\Big].$$
+
+The `1/a` converts site occupation to per-spin linear density in nm⁻¹.
+The standard lesser Green's function is `G^<=iG^n`; using the positive
+correlation avoids confusing an imaginary-valued lesser function with
+occupation.
 
 **Why this is non-negative by construction.** Every factor —
 `Γ_{S,D} ≥ 0` (§III.2's causality requirement), `f_{S,D} \in (0,1)`
@@ -640,35 +664,28 @@ leans on.
 
 ## IV.2 Code walkthrough: `charge::electron_density`
 
-`charge::electron_density` implements the integral above as a rectangle
--rule sum over the same energy grid Part III swept, with two details worth
-noting:
+`charge::electron_density` implements the integral above as a uniform
+weighted sum over the energy grid Part III swept. Its `d_e` argument is
+the **quadrature weight in eV**, not necessarily the device's requested
+maximum grid step. For the SCF midpoint grid it is the actual cell width.
+A general nonuniform energy grid needs a different quadrature rather than
+passing a single width to this API. Two normalization details matter:
 
 - `gamma_s = t_hop * sin(k)` is *half* of `Γ_S = 2t\sin(k)` from §III.3;
   combined with the function's `1/pi` prefactor (rather than the `1/2π`
   the formula above has), the two halvings cancel exactly:
   `t\sin(k)/\pi = (2t\sin(k))/(2\pi)`, reproducing the textbook formula's
   magnitude exactly, just factored differently.
-- There is no explicit spin-degeneracy factor of two here, unlike
-  `calc_current`'s explicit `2e/h` (§II.1). Whether that's correct depends
-  on whether `f_S`/`f_D`/the density of states already implicitly assume a
-  spin-summed convention — carried over unchanged from the original
-  `calc_n()`, which (before this rewrite closed the feedback loop, Part V)
-  was never checked against any reference calculation.
+- The result is explicitly **per spin, single orbital**, in nm⁻¹; a Fermi
+  probability cannot encode spin degeneracy. Multiply by two downstream
+  for spin-summed density. The current includes spin degeneracy but the
+  default unit-area SCF charge conversion does not; explicit-area SCF does.
+  The analytic half-filled uniform
+  chain regression fixes this normalization at `n=1/(2a)` per spin.
 
-Two bug fixes relative to the original `calc_n()`, both necessary for the
-self-consistent loop (Part V) to respond to the actual device physics
-rather than returning an (effectively) constant:
-
-1. **Per-energy Fermi weight.** The original evaluated `f(E_{fs})`/`f(E_{fd})`
-   *once*, outside the energy sum, collapsing the density's entire energy
-   dependence to a single number. Fixed to use the energy-dependent
-   `f_S(E)`/`f_D(E)` inside the sum, matching `calc_current` (§II.2).
-2. **Per-contact band-edge mask.** The original used one mask
-   (`E > \psi_f(1)`, the *source* band edge) for both the source and drain
-   contact terms. Fixed so each contact's term is gated by its own band
-   edge — consistent with how `green_function_sweep` already conditions
-   each contact's self-energy on its own band edge (§III.2).
+Each energy sample uses `f_S(E)` and `f_D(E)` at that energy. Source and
+drain injection are separately restricted to their own propagating bands;
+an evanescent contact injects no particles.
 
 ---
 
@@ -676,15 +693,10 @@ rather than returning an (effectively) constant:
 
 ## V.1 Physics: why self-consistency matters
 
-Parts I–IV, run once in sequence, are still not a complete device
-simulation: `calc_potential` solved electrostatics assuming `\rho = 0`
-(no mobile charge), and separately, `electron_density` computed what the
-charge *would* be for that potential — but the two were never fed back
-into each other. Physically, mobile charge *screens* the electrostatic
-potential (that's what the `\rho` term in Poisson's equation is for), and
-the potential in turn determines where charge accumulates — a genuine
-feedback loop. `selfconsistent::solve_self_consistent` is the module that
-closes it (no equivalent exists in the original MATLAB code):
+A single electrostatic solve at fixed charge and a subsequent NEGF density
+calculation do not establish self-consistency. Mobile charge screens the
+electrostatic potential, and the potential determines where charge
+accumulates. `selfconsistent::solve_self_consistent` evaluates this feedback:
 
 1. Solve electrostatics (`calc_potential`) for the current `\rho`.
 2. Run the NEGF sweep (Part III) at the resulting potential.
@@ -714,44 +726,46 @@ $$\rho_{n+1} = \rho_n + \alpha\,(\rho_{n+1}^{\text{target}} - \rho_n), \qquad \a
 (`SelfConsistentOptions::mixing`, default `0.3`). Smaller `α` is more
 stable but converges more slowly (more iterations to reach a given
 tolerance); `α = 1` recovers plain, undamped fixed-point iteration.
-Convergence is declared when the largest change in `\psi_f` between
-iterations drops below `tolerance` (default `1e-6` eV); if
-`max_iterations` (default 50) is exhausted first, `NotConverged` is
-returned — reporting failure explicitly rather than silently returning a
-garbage, unconverged potential.
+Convergence is declared when the **undamped fixed-point potential
+residual** `max(abs(Poisson(rho_target)-psi_current))` drops below
+`tolerance` (default `1e-6` eV), before applying mixing. Thus arbitrarily
+small mixing cannot fake convergence by making a tiny step. If
+`max_iterations` (default 50) is exhausted, `NotConverged` reports the
+last undamped residual.
 
-**`mixing` and `eta` are numerical knobs, not physical parameters**: they
-govern *whether and how fast* the iteration converges, not what it
-converges to. A `NotConverged` result isn't evidence the underlying device
-physics is invalid — it may just need more iterations, a smaller `mixing`,
-or a larger `eta` (§III.4). Conversely, convergence is necessary but not
-sufficient for physical correctness: a converged fixed point still
-inherits every approximation from Parts I–IV (Part VI collects them).
+**Mixing changes convergence rate, not the fixed point. Finite eta
+changes the density and potentially the fixed point** (§III.4). A
+`NotConverged` result may require more iterations, a smaller mixing factor,
+or better energy resolution; increasing eta can stabilize a different,
+more absorptive problem, not validate the original one. Conversely,
+fixed-point convergence does not validate the physical approximations.
 
 ## V.3 Charge-density units
 
-`calc_potential`'s right-hand side (§I.3) divides `\rho + N_{dot}` by
-`\varepsilon_0 \varepsilon_{si}` (`EPS_0` in SI units, F/m). For that
-division to land in the same eV/nm² ballpark as the other right-hand-side
-term (`(\psi_g + \psi_{bi})/\lambda^2`), `\rho` must be a genuine volume
-charge density in C/m³ — the original code never exercised this (`\rho`
-was always zero), so it was never validated. The self-consistent loop
-converts Part IV's electron density accordingly:
+Two separate conversions are essential; neither substitutes for the other:
 
-1. `charge::electron_density` returns a **linear** density in nm⁻¹ (the
-   model's native length unit — the original multiplied by `1e9` at this
-   point to plot on a real-world axis, but feeding that ~10⁹×-too-large
-   value straight into `\rho`, which shares scale with `\psi_g/\lambda^2`
-   etc. still in nm, overwhelms the electrostatic solve and makes the
-   iteration diverge by many orders of magnitude — this is why the
-   conversion below is done explicitly, in the caller, rather than baked
-   into `electron_density` the way the original baked in its `1e9`).
-2. Convert nm⁻¹ → m⁻¹ (`* 1e9`) and treat the 1-D chain as having an
-   implicit unit (1 m²) cross-section, so the linear density doubles as a
-   volume density.
-3. Multiply by `-e` (electrons are negatively charged):
-   `\rho(x) = -e \cdot n_{electron}(x) \cdot 10^9` (`target_rho` in
-   `solve_self_consistent`).
+1. `charge::electron_density` returns **per-spin linear density** in nm⁻¹.
+2. Convert to m⁻¹ (`*1e9`) and divide by a transverse area to obtain m⁻³.
+   Rust callers can supply `Device::effective_area_m2`; no width or area is
+   inferred from `d_ch` or gate geometry. With `None` (default), SCF uses an
+   implicit **1 m²** area and per-spin charge.
+3. Multiply by `-e`. With explicit area `A`, the spin-summed target is
+   `rho_target=-2*e*n_electron*1e9/A` in C/m³. The default without an area
+   uses `rho_target=-e*n_electron*1e9`. `Device::mobile_charge_density`
+   performs this conversion; the NEGF density remains per spin in both modes.
+4. In `calc_potential`, the source is
+   `(rho+n_dot)*1e-18/(EPS_0*k_si)`, not simply `rho/epsilon`. The factor
+   `1e-18` converts the SI m⁻² source to the nm⁻² operator (§I.3).
+
+The default unit-area convention dilutes a 1-D mode over an enormous area relative
+to a nanoscale channel, making mobile-charge feedback extremely weak.
+The loop is closed algorithmically, but rapid convergence under this
+normalization does not demonstrate appreciable physical screening. A
+quantitative transistor model requires an explicit physical area and
+convergence studies. The uniform transverse-density approximation and
+finite-eta limitations remain even with explicit area. See
+[`ELECTROSTATIC_GEOMETRY.md`](ELECTROSTATIC_GEOMETRY.md) for the Rust API and
+manufactured-source and finite-area regression checks.
 
 `N_dot` (fixed dopant charge) is left as-is (default zero, undoped body);
 if used with a nonzero value it should be supplied in the same C/m³ units.
@@ -759,18 +773,31 @@ if used with a nonzero value it should be supplied in the same C/m³ units.
 ## V.4 Code walkthrough: `selfconsistent::solve_self_consistent`
 
 ```text
-calc_potential()                          // rho = 0 initially
+validate_device_and_options()
+calc_potential()                          // uses existing rho (initially zero)
 loop (up to max_iterations):
-    energies      = negf_energy_grid(...)  // min(psi_f) .. 0.7*e_max, step d_e
-    green         = green_function_sweep(energies, eta)   // Part III
-    n_electron    = electron_density(green, ...)           // Part IV
-    rho          += mixing * (target_rho(n_electron) - rho)   // §V.2, §V.3
-    psi_before    = psi_f.clone()
-    calc_potential()                       // re-solve with updated rho
-    residual      = max(|psi_f - psi_before|)
-    if residual < tolerance: return Ok(...)
+    energies   = negf_energy_grid(...)    // midpoint cells in [L,U], see II.4
+    width      = energies[1] - energies[0] // actual quadrature weight in eV
+    green      = green_function_sweep(energies, eta)
+    n_electron = electron_density(green, ..., width)  // per spin, nm^-1
+    rho_before, psi_before = rho.clone(), psi_f.clone()
+    rho        = map(device.mobile_charge_density, n_electron) // C/m^3
+    calc_potential()                     // undamped target potential
+    residual   = max(abs(psi_f - psi_before))
+    if residual < tolerance:
+        restore rho_before, psi_before, and barrier
+        return Ok(residual, green, n_electron)
+    rho = rho_before + mixing * (rho - rho_before)
+    calc_potential()                     // next mixed iterate
 return Err(NotConverged)
 ```
+
+On success, device potential, returned Green's functions, and returned
+density describe the **same tested iterate**. Stored `rho` is the iterate's
+mixed input; its target inferred from the returned density agrees only to
+the fixed-point potential tolerance. The SCF grid rejects empty,
+under-resolved, nonfinite, and over-budget windows instead of silently
+returning a misleading density.
 
 ---
 
@@ -784,35 +811,43 @@ doc comments; this is a consolidated summary.
   not valid for bulk/thick-body devices; a classical (non-quantized)
   transverse charge model in tension with the quantum-mechanical
   longitudinal NEGF treatment.
-- **Ballistic Landauer current** (Part II.1): `T=1` above the barrier,
-  `T=0` below — no scattering, no sub-barrier tunneling. Good for channels
-  short compared to the mean free path; overestimates on-current and
-  underestimates subthreshold current otherwise.
+- **Coherent Landauer–Caroli current** (Part II.1): includes elastic
+  reflection, tunneling, and interference, but no dissipative scattering,
+  energy relaxation, or dephasing. Assumes static single-particle
+  electrostatics and equilibrium reservoirs. The separate thermionic
+  comparator (Part II.2), not the default, assumes a step transmission.
+- **Spectral weight versus flux** (Part III.3): scattering-state LDOS is
+  not transmission or current density. Large spectral peaks alone do
+  not establish appreciable current.
+- **Independent convergence checks** (Part II.3): SCF fixed-point
+  convergence is distinct from current energy integration, density
+  integration, small-eta, and spatial-grid convergence.
 - **Effective-mass, single-valley, parabolic band** (`m_eff`, Parts II–III):
   stands in for silicon's multiple equivalent valleys and non-parabolic
   dispersion away from the band edge. Treat absolute currents as
   illustrative trends, not device-accurate predictions. Spin degeneracy
-  *is* included in `calc_current` via the explicit `2e/h`.
+  *is* included in both current models via `2e²/h` for eV integration.
 - **Tight-binding discretization range of validity** (Part III.1): valid
   only while the swept energy range stays well below the chain's `4t`
   bandwidth; check via grid refinement at new device scales.
-- **Contact self-energy sign** (Part III.2): was an inherited bug (wrong
-  causality sign, `Im(Σ) > 0` for propagating modes), now fixed to the
-  standard `Σ = -t\,e^{ik(E)a}` (implemented as `t\,e^{-i\,ka_s}` for the
-  branch this code computes). Verified by two regression tests; the
-  self-consistent loop's convergence behavior and default `eta`/`mixing`
-  were re-checked and did not need retuning after the fix.
-- **No explicit spin-degeneracy factor** in the self-consistent charge
-  density (Part IV.2), unlike `calc_current`'s explicit `2e/h`; carried
-  over unchanged from the original `calc_n`, which was never checked
-  against a reference before this rewrite closed the feedback loop.
+- **Retarded leads** (Part III.2): causal propagating root and decaying
+  real roots outside both band edges; evanescent real shifts are retained.
+- **Absorbing eta** (Part III.4): no compensating injection, so eta changes
+  occupation and potentially the fixed point. Contact-only density does
+  not prescribe occupations for isolated bound states.
+- **Per-spin charge** (Part IV.2): normalization is verified against an
+  analytic uniform chain; it is not spin-summed despite spin-degenerate
+  current. Fermi probabilities cannot hide a degeneracy factor.
+- **SCF area normalization** (Part V.3): the default per-spin, implicit 1 m²
+  area yields very weak feedback. Explicit area selects spin-summed volume
+  charge but still assumes uniform transverse density. Fixed-point convergence
+  alone does not validate screening, eta, or energy quadrature.
 
-None of the above are believed to affect the *qualitative* trends the test
-suite checks (current increasing with gate/drain bias, self-consistent
-convergence to a stable, non-negative charge density) — but they mean
-absolute numbers from this model should be read as illustrating device
-physics concepts, not as quantitatively validated predictions for a real
-device.
+Passing qualitative trends and positivity tests does not validate the
+charge normalization, physical screening, or the finite-eta limit. These
+limitations can affect quantitative results even at a converged fixed
+point. Read results as educational illustrations, not validated
+predictions for a real device.
 
 ---
 
@@ -822,8 +857,8 @@ The test suite (`cargo test --workspace`) validates two genuinely different
 things, and it's worth knowing which is which when reading or extending it:
 
 - **Numerical correctness** — "does the fast algorithm compute the same
-  thing as a slow, obviously-correct reference?" `tridiag`'s Thomas
-  algorithm is checked against dense Gaussian elimination
+  thing as a slow, obviously-correct reference?" `tridiag`'s pivoted
+  solver is checked against dense Gaussian elimination
   (§I.4); `negf`'s recursive Green's function sweep and boundary-column
   solves are checked against a dense Gauss-Jordan matrix inversion
   (§III.5). These tests would catch an algebra mistake in the `O(N)`
@@ -831,8 +866,7 @@ things, and it's worth knowing which is which when reading or extending it:
 - **Physical correctness** — "does the model behave the way the physics
   says it should?" Current increasing with gate bias and with drain bias
   (§II, `device::tests`), the self-consistent loop converging to a stable,
-  non-negative charge density (§V, `selfconsistent::tests`), and — since
-  the sign fix in Part III.2 — the local density of states staying
+  non-negative charge density (§V, `selfconsistent::tests`), and the local density of states staying
   non-negative (`negf::tests::g_diag_is_non_negative_at_self_consistent_loop_broadening`)
   and the contact self-energy carrying the causally-required sign
   (`negf::tests::contact_self_energy_has_non_positive_imaginary_part_for_propagating_modes`).
@@ -844,12 +878,31 @@ things, and it's worth knowing which is which when reading or extending it:
 full pipeline (Parts I–V) at the model's actual default device scale rather
 than a toy size, specifically to catch issues that only appear once the
 NEGF energy grid and tight-binding bandwidth are at realistic proportions.
-`notebooks/negforge_demo.ipynb` is executed end-to-end
-(`jupyter nbconvert --execute`) before committing to confirm the full
-Python/Jupyter frontend path works; its outputs are cleared before
-committing since they go stale the moment the engine changes.
+`physical_regressions.rs` separately checks SI/nm charge-source scaling
+and electron-energy sign, absolute current in A and shared reservoir
+reference, undamped residuals under tiny mixing, matching returned NEGF
+and device iterates, symmetric geometry, and invalid inputs/ranges.
+Unit tests cover analytic per-spin occupation, uniform-chain lead shifts,
+near-pole diagonal stability, and pivoted real/complex systems.
+These are targeted invariants, not quantitative validation of a real MOSFET.
 
-Run everything with `cargo test --workspace`.
+See the README setup instructions: use Rust/Cargo plus CPython 3.14
+(the primary validation target; CPython 3.9–3.13 is also supported)
+and build/install the PyO3 extension before running the Python suite.
+
+```bash
+cargo test --locked -p negforge-core
+cargo test --locked --workspace
+python -m pytest -q tests
+jupyter nbconvert --to notebook --execute notebooks/negforge_demo.ipynb \
+  --output negforge_demo.executed.ipynb --output-dir "$TMPDIR"
+```
+
+The Python tests (`tests/test_python.py`) and notebook exercise paths not
+covered by Rust tests. Notebook execution requires the optional notebook
+dependencies and a kernel using the environment containing the extension.
+Write executed output outside the source notebook; execution is a separate
+verification step, not implied by a passing Rust suite.
 
 ---
 
@@ -865,12 +918,14 @@ Run everything with `cargo test --workspace`.
 | `Σ_S`, `Σ_D` | Contact retarded self-energies | eV |
 | `Γ_S`, `Γ_D` | Contact broadening functions, `-2 Im(Σ)` | eV |
 | `G^r` | Retarded Green's function | eV⁻¹ (energy-domain) |
-| `f_S`, `f_D` | Source/drain Fermi-Dirac occupation | dimensionless |
+|| `f_S`, `f_D` | Source/drain Fermi-Dirac occupation | dimensionless |
+|| `T(E)`, `mathcal T(E)` | Coherent Caroli transmission probability | dimensionless |
+|| `I` | Spin-degenerate single-mode current | A (not current per width) |
 | `k_B`, `h`, `ħ`, `e`, `m_e` | Physical constants (`constants.rs`) | SI |
 | `ρ`, `rho` | Charge density fed into the Poisson solve | C/m³ |
-| `n(x)` | Electron number density from NEGF | nm⁻¹ (`electron_density`'s return value) |
+| `n(x)` | Per-spin, single-orbital linear electron density from NEGF | nm⁻¹ (`electron_density`'s return value) |
 | `N_dot` | Fixed (dopant) charge term | same units as `rho` |
 | `mixing`, `α` | Linear/Picard mixing factor for the self-consistent loop | dimensionless, `(0,1]` |
 
 Lengths throughout are in nm, energies and potentials in eV, temperature in
-Kelvin — matching the original MATLAB code's convention end to end.
+Kelvin.

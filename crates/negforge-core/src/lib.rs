@@ -1,15 +1,14 @@
-//! NEGForge: a Rust port of a 1D ballistic-MOSFET electrostatics + NEGF
-//! transport model (originally MATLAB, see `legacy_matlab/`).
+//! NEGForge: a 1D ballistic-MOSFET electrostatics + NEGF transport model.
 //!
 //! See the crate modules for the physics of each piece, and the top-level
-//! repository README for the overall architecture, build instructions, and
-//! a list of deliberate deviations from the original code.
+//! repository README for architecture, build instructions, and limitations.
 
 pub mod charge;
 pub mod constants;
 pub mod device;
 pub mod error;
 pub mod negf;
+pub mod resources;
 pub mod selfconsistent;
 pub mod sweep;
 mod tridiag;

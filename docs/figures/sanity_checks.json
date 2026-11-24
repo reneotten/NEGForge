@@ -1,0 +1,306 @@
+{
+  "parameters": {
+    "a": 0.25,
+    "l_ch": 8.0,
+    "l_ds": 8.0,
+    "auto_size_contacts": false,
+    "v_g": 0.5,
+    "v_ds": 0.1,
+    "d_e": 0.002,
+    "t": 300.0,
+    "e_fs": 0.05,
+    "d_ch": 5.0,
+    "d_ox": 5.0,
+    "geo": 1.0
+  },
+  "effective_area_m2": 2e-17,
+  "scf_options": {
+    "max_iterations": 400,
+    "tolerance": 1e-07,
+    "mixing": 0.1,
+    "eta": 0.002,
+    "green_energy_fraction": 1.0
+  },
+  "sites": 97,
+  "screening_length_nm": 8.473185457363234,
+  "decoupled_barrier_eV": 0.04251403994931558,
+  "scf_barrier_eV": 0.10312154832367298,
+  "max_feedback_eV": 0.07512200868310992,
+  "min_feedback_eV": 0.05301499143992493,
+  "scf_iterations": 85,
+  "scf_residual_eV": 9.19553811984386e-08,
+  "peak_abs_charge_C_m3": 180086.25592913726,
+  "implicit_unit_area_iterations": 1,
+  "implicit_unit_area_max_feedback_eV": 0.0,
+  "fixed_eta_half_dE_barrier_eV": 0.10311816841779346,
+  "fixed_eta_half_dE_residual_eV": 9.688473480429227e-08,
+  "half_eta_half_dE_barrier_eV": 0.1109867110827707,
+  "half_eta_half_dE_residual_eV": 9.706704788559062e-08,
+  "ldos": [
+    {
+      "shape": [
+        321,
+        97
+      ],
+      "maximum_per_eV_nm": 31.781977477052624,
+      "fraction_above_1e_minus_6_peak": 0.9681407971223945
+    },
+    {
+      "shape": [
+        293,
+        97
+      ],
+      "maximum_per_eV_nm": 26.666535745696862,
+      "fraction_above_1e_minus_6_peak": 0.9621406706308715
+    }
+  ],
+  "transport_rendered": true,
+  "spectral_current": {
+    "electrostatic": {
+      "coherent_api_A": 1.6542014606104323e-06,
+      "integrated_spectrum_A": 1.6542014691482233e-06,
+      "thermionic_A": 1.6441823739512063e-06,
+      "integration_relative_difference": 5.16127641729925e-09,
+      "half_step_relative_change": 1.6450525658527125e-08,
+      "sub_barrier_current_A": 6.062229299235906e-08,
+      "sub_barrier_fraction": 0.03664746654080444,
+      "max_T": 0.9999999999507216,
+      "min_T": 1.3256790929513815e-05,
+      "common_lead_band_min_eV": 0.02652305180205338
+    },
+    "finite-area SCF": {
+      "coherent_api_A": 2.391830352963275e-07,
+      "integrated_spectrum_A": 2.3916468391229014e-07,
+      "thermionic_A": 2.3610559148664354e-07,
+      "integration_relative_difference": 7.672527449371169e-05,
+      "half_step_relative_change": 0.00016008101419177876,
+      "sub_barrier_current_A": 9.960469357271359e-09,
+      "sub_barrier_fraction": 0.041646907036342384,
+      "max_T": 0.9999999998896778,
+      "min_T": 0.7141203172542573,
+      "common_lead_band_min_eV": 0.10164506048516331
+    }
+  },
+  "iv_points": [
+    {
+      "sweep": "v_g",
+      "voltage_V": 0.3,
+      "scf": false,
+      "barrier_eV": 0.1308877238060198,
+      "coherent_A": 8.502782480544783e-08,
+      "thermionic_A": 8.397141368355909e-08,
+      "iterations": 0,
+      "residual_eV": null
+    },
+    {
+      "sweep": "v_g",
+      "voltage_V": 0.3,
+      "scf": true,
+      "barrier_eV": 0.15700939090584523,
+      "coherent_A": 3.1442281923494543e-08,
+      "thermionic_A": 3.099770222109321e-08,
+      "iterations": 76,
+      "residual_eV": 8.852562415062604e-08
+    },
+    {
+      "sweep": "v_g",
+      "voltage_V": 0.35,
+      "scf": false,
+      "barrier_eV": 0.10863893765529833,
+      "coherent_A": 1.9488454674422282e-07,
+      "thermionic_A": 1.9293233275517022e-07,
+      "iterations": 0,
+      "residual_eV": null
+    },
+    {
+      "sweep": "v_g",
+      "voltage_V": 0.35,
+      "scf": true,
+      "barrier_eV": 0.1421885286645426,
+      "coherent_A": 5.552291140970474e-08,
+      "thermionic_A": 5.4654185636163126e-08,
+      "iterations": 77,
+      "residual_eV": 9.007479215283887e-08
+    },
+    {
+      "sweep": "v_g",
+      "voltage_V": 0.39999999999999997,
+      "scf": false,
+      "barrier_eV": 0.08646959418042482,
+      "coherent_A": 4.3062838684458884e-07,
+      "thermionic_A": 4.2709409175652087e-07,
+      "iterations": 0,
+      "residual_eV": null
+    },
+    {
+      "sweep": "v_g",
+      "voltage_V": 0.39999999999999997,
+      "scf": true,
+      "barrier_eV": 0.12834098692307508,
+      "coherent_A": 9.423515096013097e-08,
+      "thermionic_A": 9.245850140157227e-08,
+      "iterations": 76,
+      "residual_eV": 9.582315982359368e-08
+    },
+    {
+      "sweep": "v_g",
+      "voltage_V": 0.44999999999999996,
+      "scf": false,
+      "barrier_eV": 0.06439869180815713,
+      "coherent_A": 8.891875125533092e-07,
+      "thermionic_A": 8.834352217435208e-07,
+      "iterations": 0,
+      "residual_eV": null
+    },
+    {
+      "sweep": "v_g",
+      "voltage_V": 0.44999999999999996,
+      "scf": true,
+      "barrier_eV": 0.11550778700001889,
+      "coherent_A": 1.5307453687208971e-07,
+      "thermionic_A": 1.496216136963431e-07,
+      "iterations": 76,
+      "residual_eV": 9.888221885745452e-08
+    },
+    {
+      "sweep": "v_g",
+      "voltage_V": 0.5,
+      "scf": false,
+      "barrier_eV": 0.04251403994931558,
+      "coherent_A": 1.6542014606104323e-06,
+      "thermionic_A": 1.6441823739512063e-06,
+      "iterations": 0,
+      "residual_eV": null
+    },
+    {
+      "sweep": "v_g",
+      "voltage_V": 0.5,
+      "scf": true,
+      "barrier_eV": 0.10312154832367298,
+      "coherent_A": 2.391830352963275e-07,
+      "thermionic_A": 2.3610559148664354e-07,
+      "iterations": 85,
+      "residual_eV": 9.19553811984386e-08
+    },
+    {
+      "sweep": "v_g",
+      "voltage_V": 0.5499999999999999,
+      "scf": false,
+      "barrier_eV": 0.021030283946175062,
+      "coherent_A": 2.7028287458825797e-06,
+      "thermionic_A": 2.6855028191643156e-06,
+      "iterations": 0,
+      "residual_eV": null
+    },
+    {
+      "sweep": "v_g",
+      "voltage_V": 0.5499999999999999,
+      "scf": true,
+      "barrier_eV": 0.09647208971582165,
+      "coherent_A": 2.9581086587650235e-07,
+      "thermionic_A": 3.0017315759135535e-07,
+      "iterations": 97,
+      "residual_eV": 9.186373178815543e-08
+    },
+    {
+      "sweep": "v_g",
+      "voltage_V": 0.6,
+      "scf": false,
+      "barrier_eV": 0.0006227994187807843,
+      "coherent_A": 3.820241724036635e-06,
+      "thermionic_A": 3.837980696125407e-06,
+      "iterations": 0,
+      "residual_eV": null
+    },
+    {
+      "sweep": "v_g",
+      "voltage_V": 0.6,
+      "scf": true,
+      "barrier_eV": 0.09276969783898294,
+      "coherent_A": 3.376510081329128e-07,
+      "thermionic_A": 3.4247593504450825e-07,
+      "iterations": 99,
+      "residual_eV": 9.472182264935736e-08
+    },
+    {
+      "sweep": "v_ds",
+      "voltage_V": 0.0,
+      "scf": false,
+      "barrier_eV": 0.06732277305570622,
+      "coherent_A": 0.0,
+      "thermionic_A": 0.0,
+      "iterations": 0,
+      "residual_eV": null
+    },
+    {
+      "sweep": "v_ds",
+      "voltage_V": 0.0,
+      "scf": true,
+      "barrier_eV": 0.13128519039872935,
+      "coherent_A": 0.0,
+      "thermionic_A": 0.0,
+      "iterations": 62,
+      "residual_eV": 8.887682254044016e-08
+    },
+    {
+      "sweep": "v_ds",
+      "voltage_V": 0.05,
+      "scf": false,
+      "barrier_eV": 0.05431946882764917,
+      "coherent_A": 9.982217896745459e-07,
+      "thermionic_A": 9.969086889329722e-07,
+      "iterations": 0,
+      "residual_eV": null
+    },
+    {
+      "sweep": "v_ds",
+      "voltage_V": 0.05,
+      "scf": true,
+      "barrier_eV": 0.11513363218920473,
+      "coherent_A": 1.33772747930129e-07,
+      "thermionic_A": 1.3191069152431314e-07,
+      "iterations": 69,
+      "residual_eV": 8.816062857519569e-08
+    },
+    {
+      "sweep": "v_ds",
+      "voltage_V": 0.1,
+      "scf": false,
+      "barrier_eV": 0.04251403994931558,
+      "coherent_A": 1.6542014606104323e-06,
+      "thermionic_A": 1.6441823739512063e-06,
+      "iterations": 0,
+      "residual_eV": null
+    },
+    {
+      "sweep": "v_ds",
+      "voltage_V": 0.1,
+      "scf": true,
+      "barrier_eV": 0.10312154832367298,
+      "coherent_A": 2.391830352963275e-07,
+      "thermionic_A": 2.3610559148664354e-07,
+      "iterations": 85,
+      "residual_eV": 9.19553811984386e-08
+    },
+    {
+      "sweep": "v_ds",
+      "voltage_V": 0.15,
+      "scf": false,
+      "barrier_eV": 0.03154542591926258,
+      "coherent_A": 2.2355474850219058e-06,
+      "thermionic_A": 2.2159914841961462e-06,
+      "iterations": 0,
+      "residual_eV": null
+    },
+    {
+      "sweep": "v_ds",
+      "voltage_V": 0.15,
+      "scf": true,
+      "barrier_eV": 0.09751520672465298,
+      "coherent_A": 2.8982997781993516e-07,
+      "thermionic_A": 2.948426787087957e-07,
+      "iterations": 105,
+      "residual_eV": 9.77950109226633e-08
+    }
+  ]
+}

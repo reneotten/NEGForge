@@ -3,13 +3,51 @@
 // no-op conversion in our code.
 #![allow(clippy::useless_conversion)]
 
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 use negforge_core::{Device, DeviceParams, SelfConsistentOptions};
 
 fn to_py_err(e: negforge_core::NegForgeError) -> PyErr {
-    PyRuntimeError::new_err(e.to_string())
+    match e {
+        negforge_core::NegForgeError::InvalidParameter(_) => PyValueError::new_err(e.to_string()),
+        _ => PyRuntimeError::new_err(e.to_string()),
+    }
+}
+
+// Validate before Rust's infallible constructor allocates or sizes vectors.
+fn validate_params(p: &DeviceParams) -> PyResult<()> {
+    for (name, value) in [
+        ("a", p.a),
+        ("d_ox", p.d_ox),
+        ("d_ch", p.d_ch),
+        ("k_si", p.k_si),
+        ("k_ox", p.k_ox),
+        ("geo", p.geo),
+        ("l_ch", p.l_ch),
+        ("t", p.t),
+        ("d_e", p.d_e),
+    ] {
+        if !value.is_finite() || value <= 0.0 {
+            return Err(PyValueError::new_err(format!(
+                "{name} must be positive and finite"
+            )));
+        }
+    }
+    if ![
+        p.e_f, p.e_g, p.v_ds, p.v_g, p.n_dot, p.e_fs, p.l_ds, p.epsilon,
+    ]
+    .iter()
+    .all(|v| v.is_finite())
+        || p.l_ds < 0.0
+        || !(0.0 < p.epsilon && p.epsilon < 1.0)
+    {
+        return Err(PyValueError::new_err(
+            "energies and biases must be finite, l_ds nonnegative, epsilon in (0, 1)",
+        ));
+    }
+    Device::checked_site_count(p).map_err(to_py_err)?;
+    Ok(())
 }
 
 /// Python-facing wrapper around [`negforge_core::Device`].
@@ -24,7 +62,8 @@ impl PyDevice {
     #[pyo3(signature = (
         a=0.5, e_f=0.15, e_g=1.0, v_ds=0.0, v_g=0.0, d_ox=5.0, d_ch=5.0,
         k_si=11.2, k_ox=3.9, geo=1.0, l_ch=40.0, auto_size_contacts=true,
-        l_ds=40.0, n_dot=0.0, epsilon=10e-15, e_fs=0.05, t=300.0, d_e=0.001
+        l_ds=40.0, n_dot=0.0, epsilon=10e-15, e_fs=0.05, t=300.0, d_e=0.001,
+        effective_area_m2=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -46,7 +85,8 @@ impl PyDevice {
         e_fs: f64,
         t: f64,
         d_e: f64,
-    ) -> Self {
+        effective_area_m2: Option<f64>,
+    ) -> PyResult<Self> {
         let params = DeviceParams {
             a,
             e_f,
@@ -68,44 +108,79 @@ impl PyDevice {
             d_e,
             m_eff: 0.9 * negforge_core::constants::M_E,
         };
-        Self {
-            inner: Device::new(params),
-        }
+        validate_params(&params)?;
+        let mut inner = Device::new(params);
+        inner
+            .set_effective_area_m2(effective_area_m2)
+            .map_err(to_py_err)?;
+        Ok(Self { inner })
     }
 
     fn calc_potential(&mut self) {
         self.inner.calc_potential();
     }
 
-    fn calc_current(&self) -> f64 {
-        self.inner.calc_current()
+    /// Coherent Landauer current through the solved potential, amperes.
+    fn calc_current(&self) -> PyResult<f64> {
+        self.calc_negf_current()
     }
 
-    fn set_v_ds(&mut self, v: f64) {
+    fn calc_negf_current(&self) -> PyResult<f64> {
+        self.inner.calc_negf_current().map_err(to_py_err)
+    }
+
+    /// Ideal step-transmission comparator (no tunnelling or reflection).
+    fn calc_thermionic_current(&self) -> f64 {
+        self.inner.calc_thermionic_current()
+    }
+
+    fn transmission_spectrum(&self, energies: Vec<f64>) -> PyResult<Vec<f64>> {
+        self.inner
+            .transmission_spectrum(&energies)
+            .map_err(to_py_err)
+    }
+
+    fn set_v_ds(&mut self, v: f64) -> PyResult<()> {
+        let mut params = self.inner.params;
+        params.v_ds = v;
+        validate_params(&params)?;
         self.inner.set_v_ds(v);
+        self.inner.calc_potential();
+        Ok(())
     }
 
-    fn set_v_g(&mut self, v: f64) {
+    fn set_v_g(&mut self, v: f64) -> PyResult<()> {
+        let mut params = self.inner.params;
+        params.v_g = v;
+        validate_params(&params)?;
         self.inner.set_v_g(v);
+        self.inner.calc_potential();
+        Ok(())
     }
 
-    fn set_l_ch(&mut self, l: f64) {
+    fn set_l_ch(&mut self, l: f64) -> PyResult<()> {
+        let mut params = self.inner.params;
+        params.l_ch = l;
+        validate_params(&params)?;
         self.inner.set_l_ch(l);
+        self.inner.calc_potential();
+        Ok(())
     }
 
-    #[pyo3(signature = (max_iterations=50, tolerance=1e-6, mixing=0.3, eta=0.08))]
+    #[pyo3(signature = (max_iterations=50, tolerance=1e-6, mixing=0.3, eta=0.08, green_energy_fraction=0.7))]
     fn solve_self_consistent(
         &mut self,
         max_iterations: usize,
         tolerance: f64,
         mixing: f64,
         eta: f64,
+        green_energy_fraction: f64,
     ) -> PyResult<(usize, f64)> {
         let opts = SelfConsistentOptions {
             max_iterations,
             tolerance,
             mixing,
-            green_energy_fraction: 0.7,
+            green_energy_fraction,
             eta,
         };
         let result = negforge_core::selfconsistent::solve_self_consistent(&mut self.inner, &opts)
@@ -146,6 +221,7 @@ impl PyDevice {
             .collect()
     }
 
+    #[pyo3(signature = (v_min, v_max, step, self_consistent=false))]
     fn sweep_v_g(
         &mut self,
         v_min: f64,
@@ -163,6 +239,7 @@ impl PyDevice {
         ))
     }
 
+    #[pyo3(signature = (v_min, v_max, step, self_consistent=false))]
     fn sweep_v_ds(
         &mut self,
         v_min: f64,
@@ -183,7 +260,7 @@ impl PyDevice {
     /// Run the NEGF sweep at the device's current potential and return
     /// `(energies, ldos)` where `ldos[k]` is the local density of states
     /// row (one value per grid site) at `energies[k]`.
-    fn local_density_of_states(&self) -> (Vec<f64>, Vec<Vec<f64>>) {
+    fn local_density_of_states(&self) -> PyResult<(Vec<f64>, Vec<Vec<f64>>)> {
         let e_min = self
             .inner
             .psi_f
@@ -192,14 +269,15 @@ impl PyDevice {
             .fold(f64::INFINITY, f64::min);
         let e_max = 0.7 * self.inner.e_max;
         let d_e = self.inner.params.d_e;
-        let steps = ((e_max - e_min) / d_e).floor().max(0.0) as usize;
-        let energies: Vec<f64> = (0..=steps).map(|k| e_min + k as f64 * d_e).collect();
+        let count = negforge_core::resources::energy_count(e_min, e_max, d_e).map_err(to_py_err)?;
+        negforge_core::resources::check_working_set(self.inner.n, count).map_err(to_py_err)?;
+        let energies: Vec<f64> = (0..count).map(|k| e_min + k as f64 * d_e).collect();
         let result = negforge_core::negf::green_function_sweep(
             &self.inner,
             &energies,
             negforge_core::negf::DEFAULT_ETA,
         );
-        (result.energies, result.g_diag)
+        Ok((result.energies, result.g_diag))
     }
 }
 
